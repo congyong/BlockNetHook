@@ -1,7 +1,9 @@
-name: Build iOS dylib
+name: Build & Release iOS dylib
 
 on:
   push:
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
@@ -11,6 +13,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Generate version
+        id: version
+        run: |
+          VERSION="v$(date +'%Y.%m.%d.%H%M%S')"
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Build dylib
         run: |
@@ -24,8 +32,11 @@ jobs:
             BlockNet.m \
             -o BlockNet.dylib
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: BlockNet-dylib
-          path: BlockNet.dylib
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          name: BlockNet ${{ steps.version.outputs.VERSION }}
+          files: BlockNet.dylib
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
