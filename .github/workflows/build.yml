@@ -27,12 +27,13 @@ jobs:
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 
-          clang -dynamiclib \
+          clang -dynamiclib BlockNet.m \
             -arch arm64 \
             -isysroot $SDK \
             -miphoneos-version-min=13.0 \
+            -framework UIKit \
             -framework Foundation \
-            BlockNet.m \
+            -framework AudioToolbox \
             -o BlockNet.dylib
 
       - name: Create Release
