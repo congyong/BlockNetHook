@@ -1,22 +1,16 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 
-static BOOL hostMatchesSuffix(NSString *host, NSString *suffix) {
-    if (!host || !suffix) return NO;
-    return [host hasSuffix:suffix];
-}
+static BOOL shouldBlock(NSURL *url) {
+    if (!url) return NO;
 
-static BOOL shouldBlock(NSURLRequest *request) {
-
-    if (!request.URL) return NO;
-
-    NSString *host = request.URL.host.lowercaseString;
+    NSString *host = url.host.lowercaseString;
     if (!host) return NO;
 
-    if (hostMatchesSuffix(host, @"umeng.com") ||
-        hostMatchesSuffix(host, @"umengcloud.com")) {
+    if ([host hasSuffix:@"umeng.com"] ||
+        [host hasSuffix:@"umengcloud.com"]) {
 
-        NSLog(@"[BlockNet] 🚫 Blocked: %@", request.URL.absoluteString);
+        NSLog(@"[BlockNet] 🚫 Blocked: %@", url.absoluteString);
         return YES;
     }
 
@@ -27,47 +21,59 @@ static BOOL shouldBlock(NSURLRequest *request) {
 
 + (void)load {
 
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
+    NSLog(@"[BlockNet] ✅ HOOK LOADED");
 
-        Class cls = [self class];
+    Class cls = [self class];
 
-        SEL originalSel = @selector(dataTaskWithRequest:completionHandler:);
-        SEL swizzledSel = @selector(bn_dataTaskWithRequest:completionHandler:);
+    // hook dataTaskWithRequest
+    method_exchangeImplementations(
+        class_getInstanceMethod(cls, @selector(dataTaskWithRequest:completionHandler:)),
+        class_getInstanceMethod(cls, @selector(bn_dataTaskWithRequest:completionHandler:))
+    );
 
-        Method originalMethod = class_getInstanceMethod(cls, originalSel);
-        Method swizzledMethod = class_getInstanceMethod(cls, swizzledSel);
-
-        method_exchangeImplementations(originalMethod, swizzledMethod);
-
-        NSLog(@"[BlockNet] ✅ NSURLSession hook installed");
-    });
+    // hook dataTaskWithURL
+    method_exchangeImplementations(
+        class_getInstanceMethod(cls, @selector(dataTaskWithURL:completionHandler:)),
+        class_getInstanceMethod(cls, @selector(bn_dataTaskWithURL:completionHandler:))
+    );
 }
 
 - (NSURLSessionDataTask *)
 bn_dataTaskWithRequest:(NSURLRequest *)request
-     completionHandler:(void (^)(NSData *data,
-                                 NSURLResponse *response,
-                                 NSError *error))completionHandler {
+     completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
 
-    if (shouldBlock(request)) {
+    NSLog(@"[BlockNet] Request: %@", request.URL);
 
+    if (shouldBlock(request.URL)) {
         if (completionHandler) {
-
             NSError *error = [NSError errorWithDomain:NSURLErrorDomain
                                                  code:NSURLErrorCancelled
                                              userInfo:nil];
-
-            dispatch_async(dispatch_get_main_queue(), ^{
-                completionHandler(nil, nil, error);
-            });
+            completionHandler(nil, nil, error);
         }
-
         return nil;
     }
 
-    return [self bn_dataTaskWithRequest:request
-                      completionHandler:completionHandler];
+    return [self bn_dataTaskWithRequest:request completionHandler:completionHandler];
+}
+
+- (NSURLSessionDataTask *)
+bn_dataTaskWithURL:(NSURL *)url
+ completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
+
+    NSLog(@"[BlockNet] URL: %@", url);
+
+    if (shouldBlock(url)) {
+        if (completionHandler) {
+            NSError *error = [NSError errorWithDomain:NSURLErrorDomain
+                                                 code:NSURLErrorCancelled
+                                             userInfo:nil];
+            completionHandler(nil, nil, error);
+        }
+        return nil;
+    }
+
+    return [self bn_dataTaskWithURL:url completionHandler:completionHandler];
 }
 
 @end
