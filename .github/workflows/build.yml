@@ -1,13 +1,12 @@
-name: Build & Release iOS dylib
+name: Build BlockNet dylib
 
 on:
   push:
     branches:
       - main
-  workflow_dispatch:
 
 permissions:
-  contents: write   # 👈 关键
+  contents: write
 
 jobs:
   build:
@@ -17,28 +16,39 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Generate version
+      # 生成自动版本号
+      - name: Generate Version
         id: version
         run: |
-          VERSION="v$(date +'%Y.%m.%d.%H%M%S')"
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          VERSION=v$(date +"%Y.%m.%d.%H%M%S")
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Generated version: $VERSION"
 
+      # 下载 fishhook
+      - name: Download fishhook
+        run: |
+          curl -L -o fishhook.c https://raw.githubusercontent.com/facebook/fishhook/main/fishhook.c
+          curl -L -o fishhook.h https://raw.githubusercontent.com/facebook/fishhook/main/fishhook.h
+
+      # 编译 dylib
       - name: Build dylib
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 
-          clang -dynamiclib BlockNet.m \
-            -arch arm64 \
-            -isysroot $SDK \
-            -miphoneos-version-min=13.0 \
-            -framework UIKit \
-            -framework Foundation \
-            -framework AudioToolbox \
-            -o BlockNet.dylib
+          clang -dynamiclib BlockNet.m fishhook.c \
+          -isysroot $SDK \
+          -arch arm64 \
+          -miphoneos-version-min=13.0 \
+          -framework UIKit \
+          -framework Foundation \
+          -o BlockNet.dylib
 
+      # 创建 Release 并上传 dylib
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.VERSION }}
-          name: BlockNet ${{ steps.version.outputs.VERSION }}
+          tag_name: ${{ env.VERSION }}
+          name: ${{ env.VERSION }}
           files: BlockNet.dylib
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
