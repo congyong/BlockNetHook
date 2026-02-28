@@ -1,243 +1,169 @@
 /**
  * BlockUmeng.dylib
  * 屏蔽 umeng.com / umengcloud.com 的所有网络请求
- * 
- * Hook 层次：
- *  1. NSURLSession (现代网络层)
- *  2. NSURLConnection (旧版网络层)
- *  3. CFNetwork / CFHTTPMessage (底层 CoreFoundation)
  *
- * 编译要求：Theos + ElleKit/CydiaSubstrate
+ * 无需 CydiaSubstrate / ElleKit，使用 ObjC runtime + fishhook 实现 hook
  */
 
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
+#include "fishhook.h"
 
-// ─── 需要 Substrate / ElleKit ───────────────────────────────────────────────
-#if __has_include(<substrate.h>)
-  #import <substrate.h>
-#elif __has_include(<CydiaSubstrate/CydiaSubstrate.h>)
-  #import <CydiaSubstrate/CydiaSubstrate.h>
-#else
-  // ElleKit 兼容头（LiveContainer 内置 ElleKit）
-  extern void MSHookMessageEx(Class _class, SEL sel, IMP imp, IMP *result);
-  #define MSHookMessageEx(cls,sel,imp,old) MSHookMessageEx(cls,sel,imp,old)
-#endif
-
-// ─── 目标域名列表 ────────────────────────────────────────────────────────────
-static NSArray<NSString *> *blockedSuffixes(void) {
-    static NSArray *list;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        list = @[
-            @"umeng.com",
-            @"umengcloud.com",
-        ];
-    });
-    return list;
+// ─── 轻量 MSHookMessageEx 替代（纯 ObjC runtime）─────────────────────────────
+// 用法与 MSHookMessageEx 完全一致
+static void HookMethod(Class cls, SEL sel, IMP newImp, IMP *oldImp) {
+    Method method = class_getInstanceMethod(cls, sel);
+    if (!method) {
+        method = class_getClassMethod(cls, sel);
+        if (!method) {
+            NSLog(@"[BlockUmeng] ⚠️ Method not found: %@ %@", cls, NSStringFromSelector(sel));
+            return;
+        }
+        cls = object_getClass(cls); // 类方法需要操作 metaclass
+        method = class_getInstanceMethod(cls, sel);
+    }
+    if (oldImp) *oldImp = method_getImplementation(method);
+    method_setImplementation(method, newImp);
 }
 
+// ─── 目标域名 ─────────────────────────────────────────────────────────────────
 static BOOL shouldBlockHost(NSString *host) {
     if (!host) return NO;
     host = host.lowercaseString;
-    for (NSString *suffix in blockedSuffixes()) {
-        // 精确匹配或子域名匹配 (*.umeng.com)
-        if ([host isEqualToString:suffix] || [host hasSuffix:[@"." stringByAppendingString:suffix]]) {
-            NSLog(@"[BlockUmeng] ❌ BLOCKED host: %@", host);
+    static NSArray *suffixes;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        suffixes = @[@"umeng.com", @"umengcloud.com"];
+    });
+    for (NSString *s in suffixes) {
+        if ([host isEqualToString:s] || [host hasSuffix:[@"." stringByAppendingString:s]]) {
+            NSLog(@"[BlockUmeng] ❌ BLOCKED: %@", host);
             return YES;
         }
     }
     return NO;
 }
 
-static BOOL shouldBlockURL(NSURL *url) {
-    return shouldBlockHost(url.host);
-}
+static BOOL shouldBlockURL(NSURL *url) { return shouldBlockHost(url.host); }
 
 static NSError *blockedError(NSURL *url) {
     return [NSError errorWithDomain:NSURLErrorDomain
                               code:NSURLErrorNotConnectedToInternet
                           userInfo:@{
         NSURLErrorFailingURLErrorKey: url ?: [NSURL URLWithString:@"about:blocked"],
-        NSLocalizedDescriptionKey: @"Request blocked by BlockUmeng tweak.",
+        NSLocalizedDescriptionKey: @"Blocked by BlockUmeng.",
     }];
 }
 
-// ─── NSURLSession Hook ───────────────────────────────────────────────────────
-
-// dataTaskWithRequest:completionHandler:
-static IMP orig_dataTaskWithRequest_completionHandler;
-static NSURLSessionDataTask *hook_dataTaskWithRequest_completionHandler(
-    NSURLSession *self, SEL _cmd, NSURLRequest *request, void (^completionHandler)(NSData *, NSURLResponse *, NSError *))
+// ─── NSURLSession hooks ───────────────────────────────────────────────────────
+static IMP orig_dataTaskWithRequest_completion;
+static NSURLSessionDataTask *hook_dataTaskWithRequest_completion(
+    NSURLSession *self, SEL _cmd, NSURLRequest *req,
+    void (^handler)(NSData *, NSURLResponse *, NSError *))
 {
-    if (shouldBlockURL(request.URL)) {
-        if (completionHandler) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                completionHandler(nil, nil, blockedError(request.URL));
-            });
-        }
-        // 返回一个已取消的空 task
-        NSURLSessionDataTask *task = ((NSURLSessionDataTask *(*)(id,SEL,NSURLRequest*,void(^)(NSData*,NSURLResponse*,NSError*)))
-            orig_dataTaskWithRequest_completionHandler)(self, _cmd, request, nil);
-        [task cancel];
-        return task;
+    if (shouldBlockURL(req.URL)) {
+        NSURLSessionDataTask *t = ((id(*)(id,SEL,NSURLRequest*,id))
+            orig_dataTaskWithRequest_completion)(self,_cmd,req,nil);
+        [t cancel];
+        if (handler) dispatch_async(dispatch_get_main_queue(), ^{ handler(nil,nil,blockedError(req.URL)); });
+        return t;
     }
-    return ((NSURLSessionDataTask *(*)(id,SEL,NSURLRequest*,void(^)(NSData*,NSURLResponse*,NSError*)))
-        orig_dataTaskWithRequest_completionHandler)(self, _cmd, request, completionHandler);
+    return ((id(*)(id,SEL,NSURLRequest*,id))orig_dataTaskWithRequest_completion)(self,_cmd,req,handler);
 }
 
-// dataTaskWithURL:completionHandler:
-static IMP orig_dataTaskWithURL_completionHandler;
-static NSURLSessionDataTask *hook_dataTaskWithURL_completionHandler(
-    NSURLSession *self, SEL _cmd, NSURL *url, void (^completionHandler)(NSData *, NSURLResponse *, NSError *))
+static IMP orig_dataTaskWithURL_completion;
+static NSURLSessionDataTask *hook_dataTaskWithURL_completion(
+    NSURLSession *self, SEL _cmd, NSURL *url,
+    void (^handler)(NSData *, NSURLResponse *, NSError *))
 {
     if (shouldBlockURL(url)) {
-        if (completionHandler) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                completionHandler(nil, nil, blockedError(url));
-            });
-        }
-        NSURLSessionDataTask *task = ((NSURLSessionDataTask *(*)(id,SEL,NSURL*,void(^)(NSData*,NSURLResponse*,NSError*)))
-            orig_dataTaskWithURL_completionHandler)(self, _cmd, url, nil);
-        [task cancel];
-        return task;
+        NSURLSessionDataTask *t = ((id(*)(id,SEL,NSURL*,id))
+            orig_dataTaskWithURL_completion)(self,_cmd,url,nil);
+        [t cancel];
+        if (handler) dispatch_async(dispatch_get_main_queue(), ^{ handler(nil,nil,blockedError(url)); });
+        return t;
     }
-    return ((NSURLSessionDataTask *(*)(id,SEL,NSURL*,void(^)(NSData*,NSURLResponse*,NSError*)))
-        orig_dataTaskWithURL_completionHandler)(self, _cmd, url, completionHandler);
+    return ((id(*)(id,SEL,NSURL*,id))orig_dataTaskWithURL_completion)(self,_cmd,url,handler);
 }
 
-// dataTaskWithRequest: (无 completion handler，delegate 模式)
 static IMP orig_dataTaskWithRequest;
 static NSURLSessionDataTask *hook_dataTaskWithRequest(
-    NSURLSession *self, SEL _cmd, NSURLRequest *request)
+    NSURLSession *self, SEL _cmd, NSURLRequest *req)
 {
-    if (shouldBlockURL(request.URL)) {
-        NSURLSessionDataTask *task = ((NSURLSessionDataTask *(*)(id,SEL,NSURLRequest*))
-            orig_dataTaskWithRequest)(self, _cmd, request);
-        [task cancel];
-        return task;
+    if (shouldBlockURL(req.URL)) {
+        NSURLSessionDataTask *t = ((id(*)(id,SEL,NSURLRequest*))orig_dataTaskWithRequest)(self,_cmd,req);
+        [t cancel]; return t;
     }
-    return ((NSURLSessionDataTask *(*)(id,SEL,NSURLRequest*))orig_dataTaskWithRequest)(self, _cmd, request);
+    return ((id(*)(id,SEL,NSURLRequest*))orig_dataTaskWithRequest)(self,_cmd,req);
 }
 
-// uploadTaskWithRequest:fromData:completionHandler:
-static IMP orig_uploadTaskWithRequest;
-static NSURLSessionUploadTask *hook_uploadTaskWithRequest(
-    NSURLSession *self, SEL _cmd, NSURLRequest *request, NSData *data,
-    void (^completionHandler)(NSData *, NSURLResponse *, NSError *))
+static IMP orig_uploadTask;
+static NSURLSessionUploadTask *hook_uploadTask(
+    NSURLSession *self, SEL _cmd, NSURLRequest *req, NSData *data,
+    void (^handler)(NSData *, NSURLResponse *, NSError *))
 {
-    if (shouldBlockURL(request.URL)) {
-        if (completionHandler) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                completionHandler(nil, nil, blockedError(request.URL));
-            });
-        }
-        NSURLSessionUploadTask *task = ((NSURLSessionUploadTask *(*)(id,SEL,NSURLRequest*,NSData*,void(^)(NSData*,NSURLResponse*,NSError*)))
-            orig_uploadTaskWithRequest)(self, _cmd, request, data, nil);
-        [task cancel];
-        return task;
+    if (shouldBlockURL(req.URL)) {
+        NSURLSessionUploadTask *t = ((id(*)(id,SEL,NSURLRequest*,NSData*,id))
+            orig_uploadTask)(self,_cmd,req,data,nil);
+        [t cancel];
+        if (handler) dispatch_async(dispatch_get_main_queue(), ^{ handler(nil,nil,blockedError(req.URL)); });
+        return t;
     }
-    return ((NSURLSessionUploadTask *(*)(id,SEL,NSURLRequest*,NSData*,void(^)(NSData*,NSURLResponse*,NSError*)))
-        orig_uploadTaskWithRequest)(self, _cmd, request, data, completionHandler);
+    return ((id(*)(id,SEL,NSURLRequest*,NSData*,id))orig_uploadTask)(self,_cmd,req,data,handler);
 }
 
-// ─── NSURLConnection Hook ────────────────────────────────────────────────────
-
-// +sendAsynchronousRequest:queue:completionHandler:
+// ─── NSURLConnection hooks ────────────────────────────────────────────────────
 static IMP orig_sendAsync;
 static void hook_sendAsync(
-    Class self, SEL _cmd, NSURLRequest *request, NSOperationQueue *queue,
-    void (^completionHandler)(NSURLResponse *, NSData *, NSError *))
+    Class cls, SEL _cmd, NSURLRequest *req, NSOperationQueue *q,
+    void (^handler)(NSURLResponse *, NSData *, NSError *))
 {
-    if (shouldBlockURL(request.URL)) {
-        NSOperationQueue *q = queue ?: [NSOperationQueue mainQueue];
-        [q addOperationWithBlock:^{
-            completionHandler(nil, nil, blockedError(request.URL));
-        }];
-        return;
+    if (shouldBlockURL(req.URL)) {
+        [(q ?: NSOperationQueue.mainQueue) addOperationWithBlock:^{
+            handler(nil, nil, blockedError(req.URL));
+        }]; return;
     }
-    ((void(*)(id,SEL,NSURLRequest*,NSOperationQueue*,void(^)(NSURLResponse*,NSData*,NSError*)))
-        orig_sendAsync)(self, _cmd, request, queue, completionHandler);
+    ((void(*)(id,SEL,NSURLRequest*,NSOperationQueue*,id))orig_sendAsync)(cls,_cmd,req,q,handler);
 }
 
-// -initWithRequest:delegate: (同步/delegate 模式)
 static IMP orig_initWithRequest;
-static id hook_initWithRequest(NSURLConnection *self, SEL _cmd, NSURLRequest *request, id delegate) {
-    if (shouldBlockURL(request.URL)) {
-        NSLog(@"[BlockUmeng] ❌ NSURLConnection blocked: %@", request.URL);
-        return nil; // 直接返回 nil 使连接失败
-    }
-    return ((id(*)(id,SEL,NSURLRequest*,id))orig_initWithRequest)(self, _cmd, request, delegate);
+static id hook_initWithRequest(NSURLConnection *self, SEL _cmd, NSURLRequest *req, id delegate) {
+    if (shouldBlockURL(req.URL)) return nil;
+    return ((id(*)(id,SEL,NSURLRequest*,id))orig_initWithRequest)(self,_cmd,req,delegate);
 }
 
-// ─── NSURLProtocol 兜底 (拦截所有漏网请求) ──────────────────────────────────
-
+// ─── NSURLProtocol 兜底 ───────────────────────────────────────────────────────
 @interface BlockUmengProtocol : NSURLProtocol
 @end
-
 @implementation BlockUmengProtocol
-
-+ (BOOL)canInitWithRequest:(NSURLRequest *)request {
-    return shouldBlockURL(request.URL);
-}
-
-+ (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)request {
-    return request;
-}
-
-- (void)startLoading {
-    NSError *error = blockedError(self.request.URL);
-    [self.client URLProtocol:self didFailWithError:error];
-}
-
++ (BOOL)canInitWithRequest:(NSURLRequest *)r { return shouldBlockURL(r.URL); }
++ (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)r { return r; }
+- (void)startLoading { [self.client URLProtocol:self didFailWithError:blockedError(self.request.URL)]; }
 - (void)stopLoading {}
-
 @end
 
-// ─── 初始化 ──────────────────────────────────────────────────────────────────
-
+// ─── Constructor ──────────────────────────────────────────────────────────────
 __attribute__((constructor))
 static void BlockUmengInit(void) {
-    NSLog(@"[BlockUmeng] ✅ Loaded — blocking umeng.com & umengcloud.com");
+    NSLog(@"[BlockUmeng] ✅ Loading...");
 
-    // 注册 NSURLProtocol 兜底
+    // NSURLProtocol 兜底
     [NSURLProtocol registerClass:[BlockUmengProtocol class]];
 
-    // Hook NSURLSession
-    Class sessionClass = [NSURLSession class];
+    // NSURLSession
+    Class S = [NSURLSession class];
+    HookMethod(S, @selector(dataTaskWithRequest:completionHandler:), (IMP)hook_dataTaskWithRequest_completion, &orig_dataTaskWithRequest_completion);
+    HookMethod(S, @selector(dataTaskWithURL:completionHandler:),     (IMP)hook_dataTaskWithURL_completion,     &orig_dataTaskWithURL_completion);
+    HookMethod(S, @selector(dataTaskWithRequest:),                   (IMP)hook_dataTaskWithRequest,            &orig_dataTaskWithRequest);
+    HookMethod(S, @selector(uploadTaskWithRequest:fromData:completionHandler:), (IMP)hook_uploadTask, &orig_uploadTask);
 
-    MSHookMessageEx(sessionClass,
-        @selector(dataTaskWithRequest:completionHandler:),
-        (IMP)hook_dataTaskWithRequest_completionHandler,
-        &orig_dataTaskWithRequest_completionHandler);
+    // NSURLConnection (类方法)
+    Class CM = object_getClass([NSURLConnection class]);
+    HookMethod(CM, @selector(sendAsynchronousRequest:queue:completionHandler:), (IMP)hook_sendAsync, &orig_sendAsync);
 
-    MSHookMessageEx(sessionClass,
-        @selector(dataTaskWithURL:completionHandler:),
-        (IMP)hook_dataTaskWithURL_completionHandler,
-        &orig_dataTaskWithURL_completionHandler);
-
-    MSHookMessageEx(sessionClass,
-        @selector(dataTaskWithRequest:),
-        (IMP)hook_dataTaskWithRequest,
-        &orig_dataTaskWithRequest);
-
-    MSHookMessageEx(sessionClass,
-        @selector(uploadTaskWithRequest:fromData:completionHandler:),
-        (IMP)hook_uploadTaskWithRequest,
-        &orig_uploadTaskWithRequest);
-
-    // Hook NSURLConnection (类方法)
-    Class connMeta = object_getClass([NSURLConnection class]);
-    MSHookMessageEx(connMeta,
-        @selector(sendAsynchronousRequest:queue:completionHandler:),
-        (IMP)hook_sendAsync,
-        &orig_sendAsync);
-
-    // Hook NSURLConnection (实例方法)
-    MSHookMessageEx([NSURLConnection class],
-        @selector(initWithRequest:delegate:),
-        (IMP)hook_initWithRequest,
-        &orig_initWithRequest);
+    // NSURLConnection (实例方法)
+    HookMethod([NSURLConnection class], @selector(initWithRequest:delegate:), (IMP)hook_initWithRequest, &orig_initWithRequest);
 
     NSLog(@"[BlockUmeng] ✅ All hooks installed");
 }
