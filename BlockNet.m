@@ -1,14 +1,21 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 
+static BOOL hostMatchesSuffix(NSString *host, NSString *suffix) {
+    if (!host || !suffix) return NO;
+    return [host hasSuffix:suffix];
+}
+
 static BOOL shouldBlock(NSURLRequest *request) {
 
     if (!request.URL) return NO;
 
-    NSString *host = request.URL.host;
+    NSString *host = request.URL.host.lowercaseString;
     if (!host) return NO;
 
-    if ([host containsString:@"umeng.com"]) {
+    if (hostMatchesSuffix(host, @"umeng.com") ||
+        hostMatchesSuffix(host, @"umengcloud.com")) {
+
         NSLog(@"[BlockNet] 🚫 Blocked: %@", request.URL.absoluteString);
         return YES;
     }
@@ -56,7 +63,7 @@ bn_dataTaskWithRequest:(NSURLRequest *)request
             });
         }
 
-        return nil; // 不发请求
+        return nil;
     }
 
     return [self bn_dataTaskWithRequest:request
