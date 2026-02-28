@@ -1,4 +1,4 @@
-name: Build BlockUmeng dylib
+name: Build BlockNew dylib
 
 on:
   push:
@@ -14,7 +14,7 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      - name: Checkout
+      - name: CheckoutB
         uses: actions/checkout@v4
 
       # ── 生成版本号 ──────────────────────────────────────────────────────────
@@ -38,35 +38,35 @@ jobs:
 
           # arm64
           clang -dynamiclib \
-            BlockUmeng.m fishhook.c \
+            BlockNew.m fishhook.c \
             -isysroot "$SDK" \
             -arch arm64 \
             -miphoneos-version-min=13.0 \
             -framework Foundation \
             -fobjc-arc \
             -Wno-unused-function \
-            -o BlockUmeng_arm64.dylib
+            -o BlockNew_arm64.dylib
 
           # arm64e（A12+ / iPhone XS 以上）
           clang -dynamiclib \
-            BlockUmeng.m fishhook.c \
+            BlockNew.m fishhook.c \
             -isysroot "$SDK" \
             -arch arm64e \
             -miphoneos-version-min=13.0 \
             -framework Foundation \
             -fobjc-arc \
             -Wno-unused-function \
-            -o BlockUmeng_arm64e.dylib
+            -o BlockNew_arm64e.dylib
 
           # 合并成 fat binary
-          lipo -create BlockUmeng_arm64.dylib BlockUmeng_arm64e.dylib \
-               -output BlockUmeng.dylib
+          lipo -create BlockNew_arm64.dylib BlockNew_arm64e.dylib \
+               -output BlockNew.dylib
 
           # 验证
           echo "=== lipo info ==="
-          lipo -info BlockUmeng.dylib
+          lipo -info BlockNew.dylib
           echo "=== file ==="
-          file BlockUmeng.dylib
+          file BlockNew.dylib
 
       # ── 创建 Release 并上传 ───────────────────────────────────────────────
       - name: Create Release
@@ -75,18 +75,18 @@ jobs:
           tag_name: ${{ env.VERSION }}
           name: ${{ env.VERSION }}
           body: |
-            ## BlockUmeng ${{ env.VERSION }}
+            ## BlockNew ${{ env.VERSION }}
 
             屏蔽 `umeng.com` 和 `umengcloud.com` 的所有网络请求。
 
             ### 安装
-            1. 下载 `BlockUmeng.dylib`
+            1. 下载 `BlockNew.dylib`
             2. 在 LiveContainer → **Tweaks** → `+` → **Import Tweak**
             3. 选择子文件夹或放根目录（全局生效）
             4. 在 App 设置中设置 **Tweak Folder**，启动即生效
 
             ### 验证
-            在设备日志中搜索 `[BlockUmeng]`，看到 `✅ All hooks installed` 表示加载成功。
-          files: BlockUmeng.dylib
+            在设备日志中搜索 `[BlockNew]`，看到 `✅ All hooks installed` 表示加载成功。
+          files: BlockNew.dylib
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
