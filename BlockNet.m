@@ -1,93 +1,73 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <dlfcn.h>
+#import <netdb.h>
 
-// Substrate function pointer
-static void (*orig_CFNetworkCopyProxiesForURL)(void);
+// fishhook type
+struct rebinding {
+    const char *name;
+    void *replacement;
+    void **replaced;
+};
 
-// ============ 弹窗确认加载 ============
+extern int rebind_symbols(struct rebinding rebindings[], size_t rebindings_nel);
+
+// 原始函数指针
+static int (*orig_getaddrinfo)(
+    const char *nodename,
+    const char *servname,
+    const struct addrinfo *hints,
+    struct addrinfo **res);
+
+// hook getaddrinfo
+static int hook_getaddrinfo(
+    const char *nodename,
+    const char *servname,
+    const struct addrinfo *hints,
+    struct addrinfo **res)
+{
+    if (nodename) {
+        NSString *host = [NSString stringWithUTF8String:nodename];
+        if ([host containsString:@"umeng.com"] ||
+            [host containsString:@"umengcloud.com"])
+        {
+            NSLog(@"[BlockNet] Blocked DNS: %@", host);
+            return EAI_FAIL;  // 让解析失败
+        }
+    }
+    return orig_getaddrinfo(nodename, servname, hints, res);
+}
+
+// 测试界面弹窗（确认 tweak 加载）
 static void showAlert(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC),
                        dispatch_get_main_queue(), ^{
-            
-            UIWindow *window = UIApplication.sharedApplication.windows.firstObject;
-            if (!window) return;
-            
+            UIWindow *w = UIApplication.sharedApplication.windows.firstObject;
+            if (!w) return;
             UIAlertController *alert =
             [UIAlertController alertControllerWithTitle:@"BlockNet"
-                                                message:@"✅ LiveContainer Tweak Loaded"
+                                                message:@"LiveContainer Tweak Loaded"
                                          preferredStyle:UIAlertControllerStyleAlert];
-            
             [alert addAction:[UIAlertAction actionWithTitle:@"OK"
                                                       style:UIAlertActionStyleDefault
                                                     handler:nil]];
-            
-            [window.rootViewController presentViewController:alert
-                                                    animated:YES
-                                                  completion:nil];
+            [w.rootViewController presentViewController:alert animated:YES completion:nil];
         });
     });
 }
 
-// ============ Hook 示例 ============
-static void *(*orig_CFURLCreateWithString)(CFAllocatorRef allocator,
-                                           CFStringRef URLString,
-                                           CFURLRef baseURL);
-
-static void *hook_CFURLCreateWithString(CFAllocatorRef allocator,
-                                        CFStringRef URLString,
-                                        CFURLRef baseURL)
-{
-    NSString *url = (__bridge NSString *)URLString;
-    
-    if ([url containsString:@"umeng.com"] ||
-        [url containsString:@"umengcloud.com"])
-    {
-        NSLog(@"[BlockNet] Blocked: %@", url);
-        return NULL;
-    }
-    
-    return orig_CFURLCreateWithString(allocator, URLString, baseURL);
-}
-
-// ============ Substrate 安装函数 ============
-static void installHook(void) {
-    
-    void *handle = dlopen(NULL, RTLD_NOW);
-    if (!handle) return;
-    
-    void *symbol = dlsym(handle, "CFURLCreateWithString");
-    if (!symbol) return;
-    
-    void *substrate = dlopen("/usr/lib/libsubstrate.dylib", RTLD_NOW);
-    if (!substrate) {
-        substrate = dlopen("/usr/lib/libellekit.dylib", RTLD_NOW);
-    }
-    
-    if (!substrate) {
-        NSLog(@"[BlockNet] No substrate/ellekit found");
-        return;
-    }
-    
-    void (*MSHookFunction)(void *, void *, void **);
-    MSHookFunction = dlsym(substrate, "MSHookFunction");
-    
-    if (!MSHookFunction) {
-        NSLog(@"[BlockNet] MSHookFunction not found");
-        return;
-    }
-    
-    MSHookFunction(symbol,
-                   (void *)hook_CFURLCreateWithString,
-                   (void **)&orig_CFURLCreateWithString);
-    
-    NSLog(@"[BlockNet] Hook installed");
-}
-
-// ============ 入口 ============
+// entry
 __attribute__((constructor))
 static void entry(void) {
+
+    // UI 提示
     showAlert();
-    installHook();
+
+    // 安装 hook
+    struct rebinding r;
+    r.name = "getaddrinfo";
+    r.replacement = hook_getaddrinfo;
+    r.replaced = (void **)&orig_getaddrinfo;
+    rebind_symbols(&r, 1);
 }
