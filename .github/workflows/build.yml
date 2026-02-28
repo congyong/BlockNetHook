@@ -1,0 +1,27 @@
+name: Build iOS dylib
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Build dylib
+        run: |
+          clang -dynamiclib \
+          -arch arm64 \
+          -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+          -framework Foundation \
+          BlockNet.m \
+          -o BlockNet.dylib
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: BlockNet-dylib
+          path: BlockNet.dylib
