@@ -9,19 +9,23 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Build dylib
         run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+
           clang -dynamiclib \
-          -arch arm64 \
-          -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-          -framework Foundation \
-          BlockNet.m \
-          -o BlockNet.dylib
+            -arch arm64 \
+            -isysroot $SDK \
+            -miphoneos-version-min=13.0 \
+            -framework Foundation \
+            BlockNet.m \
+            -o BlockNet.dylib
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: BlockNet-dylib
           path: BlockNet.dylib
