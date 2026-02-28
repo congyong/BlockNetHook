@@ -1,79 +1,42 @@
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-static BOOL shouldBlock(NSURL *url) {
-    if (!url) return NO;
+static void showAlert(NSString *message) {
 
-    NSString *host = url.host.lowercaseString;
-    if (!host) return NO;
+    dispatch_async(dispatch_get_main_queue(), ^{
 
-    if ([host hasSuffix:@"umeng.com"] ||
-        [host hasSuffix:@"umengcloud.com"]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC),
+                       dispatch_get_main_queue(), ^{
 
-        NSLog(@"[BlockNet] 🚫 Blocked: %@", url.absoluteString);
-        return YES;
-    }
+            UIWindow *keyWindow = UIApplication.sharedApplication.windows.firstObject;
+            if (!keyWindow) return;
 
-    return NO;
+            UIViewController *rootVC = keyWindow.rootViewController;
+            if (!rootVC) return;
+
+            UIAlertController *alert =
+            [UIAlertController alertControllerWithTitle:@"BlockNet"
+                                                message:message
+                                         preferredStyle:UIAlertControllerStyleAlert];
+
+            UIAlertAction *ok =
+            [UIAlertAction actionWithTitle:@"OK"
+                                     style:UIAlertActionStyleDefault
+                                   handler:nil];
+
+            [alert addAction:ok];
+
+            [rootVC presentViewController:alert animated:YES completion:nil];
+        });
+    });
 }
 
 @implementation NSURLSession (BlockNet)
 
 + (void)load {
 
-    NSLog(@"[BlockNet] ✅ HOOK LOADED");
-
-    Class cls = [self class];
-
-    // hook dataTaskWithRequest
-    method_exchangeImplementations(
-        class_getInstanceMethod(cls, @selector(dataTaskWithRequest:completionHandler:)),
-        class_getInstanceMethod(cls, @selector(bn_dataTaskWithRequest:completionHandler:))
-    );
-
-    // hook dataTaskWithURL
-    method_exchangeImplementations(
-        class_getInstanceMethod(cls, @selector(dataTaskWithURL:completionHandler:)),
-        class_getInstanceMethod(cls, @selector(bn_dataTaskWithURL:completionHandler:))
-    );
-}
-
-- (NSURLSessionDataTask *)
-bn_dataTaskWithRequest:(NSURLRequest *)request
-     completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
-
-    NSLog(@"[BlockNet] Request: %@", request.URL);
-
-    if (shouldBlock(request.URL)) {
-        if (completionHandler) {
-            NSError *error = [NSError errorWithDomain:NSURLErrorDomain
-                                                 code:NSURLErrorCancelled
-                                             userInfo:nil];
-            completionHandler(nil, nil, error);
-        }
-        return nil;
-    }
-
-    return [self bn_dataTaskWithRequest:request completionHandler:completionHandler];
-}
-
-- (NSURLSessionDataTask *)
-bn_dataTaskWithURL:(NSURL *)url
- completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
-
-    NSLog(@"[BlockNet] URL: %@", url);
-
-    if (shouldBlock(url)) {
-        if (completionHandler) {
-            NSError *error = [NSError errorWithDomain:NSURLErrorDomain
-                                                 code:NSURLErrorCancelled
-                                             userInfo:nil];
-            completionHandler(nil, nil, error);
-        }
-        return nil;
-    }
-
-    return [self bn_dataTaskWithURL:url completionHandler:completionHandler];
+    showAlert(@"✅ BlockNet dylib loaded");
 }
 
 @end
