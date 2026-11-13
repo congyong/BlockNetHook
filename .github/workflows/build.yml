@@ -68,6 +68,10 @@ jobs:
           print('source sanity check passed')
           PY
 
+      # Release asset 的 glob 对中文文件名会退化成 default.md，先复制成 ASCII 名
+      - name: Normalize release asset names
+        run: cp 规则清单.md RULES.md
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -93,6 +97,6 @@ jobs:
           files: |
             BlockNetPlus.dylib
             README.md
-            规则清单.md
+            RULES.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
