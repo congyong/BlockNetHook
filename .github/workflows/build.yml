@@ -61,7 +61,7 @@ jobs:
           for spec in "BlockNetPlus.m fishhook.c" "SafeAreaFix.m"; do
             echo "=== linking: $spec ===" >> /tmp/link.log
             clang -dynamiclib $spec -isysroot "$SDK" -fobjc-arc -framework Foundation \
-              -lobjc -DBNP_USE_FISHHOOK=1 -arch arm64 -miphoneos-version-min=13.0 \
+              -framework UIKit -DBNP_USE_FISHHOOK=1 -arch arm64 -miphoneos-version-min=13.0 \
               -o /tmp/linktest.dylib >> /tmp/link.log 2>&1
             if [ $? -ne 0 ]; then rc=1; fi
           done
@@ -105,7 +105,7 @@ jobs:
             -isysroot "$SDK"
             -fobjc-arc
             -framework Foundation
-            -lobjc
+            -framework UIKit
             -DBNP_USE_FISHHOOK=1
             "${WARN[@]}"
           )
@@ -127,7 +127,7 @@ jobs:
             -isysroot "$SDK"
             -fobjc-arc
             -framework Foundation
-            -lobjc
+            -framework UIKit
             "${WARN[@]}"
           )
 
@@ -183,6 +183,7 @@ jobs:
           assert blocks, 'cannot locate compile flag blocks'
           for _b in blocks:
               assert 'WebKit' not in _b, 'must not link WebKit framework'
+              assert 'UIKit' in _b, 'must link UIKit (ObjC class refs need it)'
           print('SafeAreaFix.m sanity check passed')
 
           # IMP 原型一致性：hook 函数签名必须与 orig 调用处的指针原型逐个对齐

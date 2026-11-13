@@ -11,9 +11,13 @@ CC    := clang
 FISHHOOK ?= 1
 WARN  := -Wall -Wno-unknown-warning-option -Wno-unused-function \
          -Wno-deprecated-declarations -Wno-cast-function-type-strict -Wno-cast-function-type
+# -framework UIKit 是必需的：SafeAreaFix.m 直接引用 UIViewController /
+# UIWindow / UIApplication / UINavigationController 等类，clang 会生成
+# _OBJC_CLASS_$_XXX 的强引用，链接时必须能找到 UIKit。
 FLAGS := -dynamiclib -isysroot "$(SDK)" -fobjc-arc -framework Foundation \
-         -DBNP_USE_FISHHOOK=$(FISHHOOK) $(WARN)
-SAFFLAGS := -dynamiclib -isysroot "$(SDK)" -fobjc-arc -framework Foundation $(WARN)
+         -framework UIKit -DBNP_USE_FISHHOOK=$(FISHHOOK) $(WARN)
+SAFFLAGS := -dynamiclib -isysroot "$(SDK)" -fobjc-arc -framework Foundation \
+            -framework UIKit $(WARN)
 
 .PHONY: all deps arm64 arm64e fat saf safarm64 safarm64e safat safverify verify clean
 
