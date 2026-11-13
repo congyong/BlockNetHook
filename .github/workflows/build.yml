@@ -142,6 +142,12 @@ jobs:
           lipo -create SafeAreaFix_arm64.dylib SafeAreaFix_arm64e.dylib \
             -output SafeAreaFix.dylib
 
+          # ── 单架构 arm64 版 ──────────────────────────────────────────────
+          # LiveContainer 官方 README: "arm64e executable is untested.
+          # It is recommended to use arm64 binary." —— 容器环境优先用单架构 arm64。
+          lipo SafeAreaFix.dylib -thin arm64 -output SafeAreaFix-arm64.dylib
+          lipo BlockNetPlus.dylib -thin arm64 -output BlockNetPlus-arm64.dylib
+
           {
             echo "### Build log"
             echo '```'
@@ -265,6 +271,7 @@ jobs:
           echo "=== architectures ==="
           lipo -info BlockNetPlus.dylib
           lipo -info SafeAreaFix.dylib
+          lipo -info SafeAreaFix-arm64.dylib
 
       # Release asset 的 glob 对中文文件名会退化成 default.md，先复制成 ASCII 名
       - name: Normalize release asset names
@@ -331,6 +338,8 @@ jobs:
           files: |
             BlockNetPlus.dylib
             SafeAreaFix.dylib
+            BlockNetPlus-arm64.dylib
+            SafeAreaFix-arm64.dylib
             README.md
             RULES.md
         env:

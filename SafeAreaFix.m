@@ -144,7 +144,18 @@ static const void *kSAFRetryKey = &kSAFRetryKey;
 
 #pragma mark - 核心：把 VC.view 收缩进安全区
 
-/* 设备是否真实存在安全区（刘海 / Home Indicator）。没有就绝不能动。 */
+/* 设备是否真实存在安全区（刘海 / Home Indicator）。没有就绝不能动。
+ *
+ * ★ v2.3 关键修正：LiveContainer 这类「容器式」运行环境里，guest app 的
+ * window 可能没有设置 safeAreaInsets（实测为全 0）。若只信 window.safeAreaInsets，
+ * 插件就会判定「这台设备没有刘海」而全程不动作 —— 表现正是「没生效」。
+ *
+ * 所以加一条兜底：按主屏幕逻辑高度判断。
+ *   iPhone SE / 8     = 667pt  → 无刘海
+ *   iPhone 8 Plus     = 736pt  → 无刘海
+ *   iPhone X 及以上   = 812pt 起 → 有刘海
+ * 800pt 是可靠的判据分界。
+ */
 static BOOL SAFDeviceHasSafeArea(UIViewController *vc) {
     UIWindow *win = vc.view.window;
     if (!win) {
@@ -153,10 +164,28 @@ static BOOL SAFDeviceHasSafeArea(UIViewController *vc) {
             if (w.isKeyWindow) { win = w; break; }
         }
     }
-    if (!win) return NO;
+    if (win) {
+        UIEdgeInsets ins = win.safeAreaInsets;
+        if (ins.top > 0.0 || ins.bottom > 0.0 || ins.left > 0.0 || ins.right > 0.0) return YES;
+    }
 
-    UIEdgeInsets ins = win.safeAreaInsets;
-    return (ins.top > 0.0 || ins.bottom > 0.0 || ins.left > 0.0 || ins.right > 0.0);
+    /* 兜底：按屏幕高度判断 */
+    CGFloat h = [UIScreen mainScreen].bounds.size.height;
+    return (h >= 800.0);
+}
+
+/* 诊断信息：一眼看出为什么没生效 */
+static void SAFLogDiagnostics(UIViewController *vc) {
+    UIWindow *win = vc.view.window;
+    UIEdgeInsets ins = win ? win.safeAreaInsets : UIEdgeInsetsZero;
+    CGSize scr = [UIScreen mainScreen].bounds.size;
+    SAFLog(@"ℹ️ 诊断: %@ window=%@ safeArea(top=%.0f bottom=%.0f l=%.0f r=%.0f) screen=%.0fx%.0f "
+           @"hasSafeArea=%d",
+           NSStringFromClass([vc class]),
+           win ? @"有" : @"nil",
+           ins.top, ins.bottom, ins.left, ins.right,
+           scr.width, scr.height,
+           SAFDeviceHasSafeArea(vc));
 }
 
 /* 真正执行收缩；已处理过则跳过 */
@@ -221,7 +250,10 @@ static void SAFApplyToViewController(id obj) {
     }
 
     if ([mode isEqualToString:@"auto"]) {
-        if (!SAFDeviceHasSafeArea(vc)) return;   /* 无刘海设备一律不动 */
+        if (!SAFDeviceHasSafeArea(vc)) {
+            SAFLogDiagnostics(vc);
+            return;   /* 无刘海设备一律不动 */
+        }
     }
 
     NSString *navPolicy = SAFConfigValue(@"SAF_NAV", @"auto");
