@@ -43,11 +43,31 @@ jobs:
           done
           exit $rc
 
+      - name: Link check each dylib separately
+        run: |
+          set -o pipefail
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          rc=0
+          for spec in "BlockNetPlus.m fishhook.c" "SafeAreaFix.m"; do
+            echo "=== linking: $spec ==="
+            { clang -dynamiclib $spec -isysroot "$SDK" -fobjc-arc -framework Foundation \
+                -lobjc -DBNP_USE_FISHHOOK=1 -arch arm64 -miphoneos-version-min=13.0 \
+                -o /tmp/linktest.dylib; } 2>&1 | tee -a /tmp/link.log || rc=1
+          done
+          echo "=== link log ==="
+          cat /tmp/link.log
+          grep -nE "error:|Undefined symbol|symbol\(s\) not found|duplicate symbol|ld: " /tmp/link.log 2>/dev/null | head -30 | while IFS= read -r l; do echo "::error::$l"; done
+          grep -A 10 "Undefined symbols" /tmp/link.log 2>/dev/null | head -16 | while IFS= read -r l; do echo "::error::ctx: $l"; done
+          exit $rc
+
       - name: Build arm64 + arm64e fat dylib
         run: |
           set -o pipefail
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          trap 'grep -E "error:" /tmp/build.log 2>/dev/null | head -40 | while IFS= read -r l; do echo "::error::$l"; done' ERR
+          trap '
+            grep -nE "error:|Undefined symbol|symbol\(s\) not found|duplicate symbol|ld: |not found for arch|framework not found|library not found" /tmp/build.log 2>/dev/null | head -30 | while IFS= read -r l; do echo "::error::$l"; done
+            grep -A 10 "Undefined symbols" /tmp/build.log 2>/dev/null | head -16 | while IFS= read -r l; do echo "::error::ctx: $l"; done
+          ' ERR
           WARN=(
             -Wall
             -Wno-unknown-warning-option
@@ -63,6 +83,7 @@ jobs:
             -isysroot "$SDK"
             -fobjc-arc
             -framework Foundation
+            -lobjc
             -DBNP_USE_FISHHOOK=1
             "${WARN[@]}"
           )
@@ -82,6 +103,7 @@ jobs:
             -isysroot "$SDK"
             -fobjc-arc
             -framework Foundation
+            -lobjc
             "${WARN[@]}"
           )
 
