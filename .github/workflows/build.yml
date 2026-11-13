@@ -2,7 +2,8 @@ name: Build BlockNetPlus dylib
 
 on:
   push:
-    branches: [main]
+    # blocknetplus: 本插件在 congyong/BlockNetHook 上的独立分支，不覆盖原项目 main
+    branches: [main, blocknetplus]
   workflow_dispatch:
 
 permissions:

@@ -43,8 +43,11 @@ BlockNetPlus/
 
 **方式 A：GitHub Actions（推荐，零本地环境）**
 
-1. 把 `BlockNetPlus/` 整个目录推到一个新仓库的 `main` 分支。
-2. Actions → `Build BlockNetPlus dylib` → Run workflow（也可由 push 触发）。
+本插件托管在 [congyong/BlockNetHook](https://github.com/congyong/BlockNetHook) 的
+**`blocknetplus` 分支**；原项目的 `main`（`BlockNet.m` 及其 CI）保持不变，两套构建互不干扰。
+
+1. 向 `blocknetplus` 分支 push 即自动触发 `Build BlockNetPlus dylib`。
+2. 也可在 Actions 里用 `workflow_dispatch` 手动触发。
 3. 产物在自动创建的 Release 里：`BlockNetPlus.dylib`（arm64 + arm64e fat）。
 
 **方式 B：macOS 本地**
@@ -109,7 +112,7 @@ make clean      # 清理产物
    可继续覆盖 `NSURLSessionStreamTask`、`CFReadStream` 等。
 4. C 层：`getaddrinfo` 已能拦住绝大多数原生请求；若 SDK 直连硬编码 IP，
    DNS 层无效，需要 hook `connect` / SSL 握手层，或改在路由器 / DNS 侧阻断
-   （`../广告追踪域名清单.txt` 已按「可阻断 / 勿封」分好类）。
+   （分析 IPA 时整理过一份域名清单，已按「可阻断 / 勿封」分类，可直接转成 DNS 阻断规则）。
 
 ## 已知限制与排障
 
