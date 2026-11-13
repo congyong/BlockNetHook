@@ -261,7 +261,7 @@ static id SAF_hook_WKInitWithFrame(id self, SEL _cmd, CGRect frame) {
 static id SAF_hook_WKInitWithCoder(id self, SEL _cmd, NSCoder *coder) {
     id ret = nil;
     if (g_origWKInitWithCoder) {
-        ret = ((id (*)(id, SEL, NSCoder))g_origWKInitWithCoder)(self, _cmd, coder);
+        ret = ((id (*)(id, SEL, NSCoder *))g_origWKInitWithCoder)(self, _cmd, coder);
     }
     Class wkClass = NSClassFromString(@"WKWebView");
     if (wkClass && [ret isKindOfClass:wkClass]) SAFConfigureWebView(ret);

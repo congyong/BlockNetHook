@@ -124,6 +124,48 @@ jobs:
           for _b in blocks:
               assert 'WebKit' not in _b, 'must not link WebKit framework'
           print('SafeAreaFix.m sanity check passed')
+
+          # IMP 原型一致性：hook 函数签名必须与 orig 调用处的指针原型逐个对齐
+          # （踩过的坑：initWithCoder: 的原型漏了 '*' → interface type 'NSCoder'
+          #   cannot be passed by value）
+          import re as _r
+          def _types(sig):
+              out = []
+              for _p in sig.split(','):
+                  _toks = _p.strip().split()
+                  if _toks[0] in ('id', 'SEL', 'Class', 'IMP'):
+                      out.append(_toks[0])
+                  elif _toks[0].startswith('*') or (len(_toks) > 1 and _toks[1].startswith('*')):
+                      out.append(_toks[0] + '*')
+                  else:
+                      out.append(_toks[0])
+              return tuple(out)
+
+          _expect = {
+              'SAF_hook_viewDidLoad':           ('id', 'SEL'),
+              'SAF_hook_viewWillAppear':        ('id', 'SEL', 'id'),
+              'SAF_hook_viewDidLayoutSubviews': ('id', 'SEL'),
+              'SAF_hook_WKInitWithFrame':       ('id', 'SEL', 'CGRect'),
+              'SAF_hook_WKInitWithCoder':       ('id', 'SEL', 'NSCoder*'),
+          }
+          for _name, _exp in _expect.items():
+              _m = _r.search(r'static \w+ ' + _name + r'\(([^)]*)\)', f)
+              assert _m, 'cannot locate ' + _name
+              assert _types(_m.group(1)) == _exp, \
+                  f'{_name} signature mismatch: {_types(_m.group(1))} != {_exp}'
+
+          for _m in _r.finditer(r'\(\((\w+) \(\*\)\(([^)]*)\)\)(g_orig\w+)\)', f):
+              _var, _params = _m.group(3), _m.group(2)
+              _exp = {
+                  'g_origViewDidLoad':           ('id', 'SEL'),
+                  'g_origViewWillAppear':        ('id', 'SEL', 'id'),
+                  'g_origViewDidLayoutSubviews': ('id', 'SEL'),
+                  'g_origWKInitWithFrame':       ('id', 'SEL', 'CGRect'),
+                  'g_origWKInitWithCoder':       ('id', 'SEL', 'NSCoder*'),
+              }[_var]
+              assert _types(_params) == _exp, \
+                  f'{_var} cast mismatch: {_types(_params)} != {_exp}'
+          print('SafeAreaFix.m IMP prototype consistency check passed')
           PY
 
       - name: Verify exported symbols
