@@ -142,11 +142,33 @@ jobs:
           lipo -create SafeAreaFix_arm64.dylib SafeAreaFix_arm64e.dylib \
             -output SafeAreaFix.dylib
 
+          # ── 诊断版（只读，零副作用）───────────────────────────────────
+          DIAGFLAGS=(
+            SafeAreaDiag.m
+            -isysroot "$SDK"
+            -fobjc-arc
+            -framework Foundation
+            -framework UIKit
+            "${WARN[@]}"
+          )
+
+          clang -dynamiclib "${DIAGFLAGS[@]}" -arch arm64 \
+            -miphoneos-version-min=13.0 -o SafeAreaDiag_arm64.dylib >> /tmp/build.log 2>&1
+          if [ $? -ne 0 ]; then cat /tmp/build.log; exit 1; fi
+
+          clang -dynamiclib "${DIAGFLAGS[@]}" -arch arm64e \
+            -miphoneos-version-min=13.0 -o SafeAreaDiag_arm64e.dylib >> /tmp/build.log 2>&1
+          if [ $? -ne 0 ]; then cat /tmp/build.log; exit 1; fi
+
+          lipo -create SafeAreaDiag_arm64.dylib SafeAreaDiag_arm64e.dylib \
+            -output SafeAreaDiag.dylib
+
           # ── 单架构 arm64 版 ──────────────────────────────────────────────
           # LiveContainer 官方 README: "arm64e executable is untested.
           # It is recommended to use arm64 binary." —— 容器环境优先用单架构 arm64。
           lipo SafeAreaFix.dylib -thin arm64 -output SafeAreaFix-arm64.dylib
           lipo BlockNetPlus.dylib -thin arm64 -output BlockNetPlus-arm64.dylib
+          lipo SafeAreaDiag.dylib -thin arm64 -output SafeAreaDiag-arm64.dylib
 
           {
             echo "### Build log"
@@ -260,6 +282,19 @@ jobs:
                           f'{_n} first used at line {_i+1} before its declaration: {_l.strip()[:80]}'
                       break
           print('SafeAreaFix.m declaration-before-use check passed')
+
+          d = open('SafeAreaDiag.m', encoding='utf-8').read()
+          assert d.count('{') == d.count('}'), 'unbalanced braces (SafeAreaDiag)'
+          assert 'SafeAreaDiagInit' in d, 'missing constructor (SafeAreaDiag)'
+          assert 'edgesForExtendedLayout =' not in d, \
+              'diagnostic build must not modify edgesForExtendedLayout (read-only!)'
+          _dcode = _r.sub(r'/\*.*?\*/', '', d, flags=_r.S)
+          _dcode = _r.sub(r'//[^\n]*', '', _dcode)
+          assert 'setFrame:' not in _dcode, 'diagnostic build must not set frames'
+          assert 'setEdgesForExtendedLayout' not in _dcode, \
+              'diagnostic build must not modify edges'
+          assert 'setNeedsLayout' not in _dcode, 'diagnostic build must not trigger layout'
+          print('SafeAreaDiag.m read-only assertions passed')
           PY
 
       - name: Verify exported symbols
@@ -268,6 +303,8 @@ jobs:
           nm -m BlockNetPlus.dylib | grep -E 'BlockNetPlusInit|SafeAreaFixInit|hook_getaddrinfo' || true
           echo "=== SafeAreaFix.dylib ==="
           nm -m SafeAreaFix.dylib | grep -E 'SafeAreaFixInit' || true
+          echo "=== SafeAreaDiag.dylib ==="
+          nm -m SafeAreaDiag.dylib | grep -E 'SafeAreaDiagInit' || true
           echo "=== architectures ==="
           lipo -info BlockNetPlus.dylib
           lipo -info SafeAreaFix.dylib
@@ -340,6 +377,8 @@ jobs:
             SafeAreaFix.dylib
             BlockNetPlus-arm64.dylib
             SafeAreaFix-arm64.dylib
+            SafeAreaDiag.dylib
+            SafeAreaDiag-arm64.dylib
             README.md
             RULES.md
         env:

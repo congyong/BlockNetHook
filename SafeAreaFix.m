@@ -156,6 +156,29 @@ static const void *kSAFRetryKey = &kSAFRetryKey;
  *   iPhone X 及以上   = 812pt 起 → 有刘海
  * 800pt 是可靠的判据分界。
  */
+/* ★ 判断一个类是不是「系统 / 第三方库」的类。
+ * class_getImageName 返回该类所在的镜像路径：
+ *   · UIKit / Foundation 等系统框架 → "/System/Library/Frameworks/UIKit.framework/UIKit"
+ *   · App 主二进制里的类        → NULL（或指向 App 可执行文件）
+ *   · 第三方 dylib 里的类       → 指向那个 dylib 的路径
+ * 用它来避免误伤系统弹窗（UIAlertController / UIActionSheet 等）。
+ */
+static BOOL SAFIsSystemOrThirdParty(Class cls) {
+    const char *img = class_getImageName(cls);
+    if (!img) return NO;                       /* 主 bundle 的类 → App 自己的 */
+    if (strstr(img, "/System/Library/")) return YES;   /* 系统框架 → 跳过 */
+    return NO;
+}
+
+/* 系统呈现类额外排除（即使不是 UIKit 框架的类） */
+static BOOL SAFIsSystemPresentation(UIViewController *vc) {
+    static NSArray *extra = nil;
+    if (!extra) extra = @[[UIAlertController class], [UIPopoverPresentationController class]];
+    for (Class c in extra) if ([vc isKindOfClass:c]) return YES;
+    if ([vc isKindOfClass:[UIActivityViewController class]]) return YES;
+    return NO;
+}
+
 static BOOL SAFDeviceHasSafeArea(UIViewController *vc) {
     UIWindow *win = vc.view.window;
     if (!win) {
@@ -224,6 +247,13 @@ static void SAFApplyToViewController(id obj) {
 
     NSString *mode = SAFConfigValue(@"SAF_MODE", @"auto");
     if ([mode isEqualToString:@"off"]) return;
+
+    /* ★ 系统 / 第三方库的 VC 一律不碰 —— v2 就是在这里破坏了系统弹窗 */
+    if (SAFIsSystemPresentation(vc)) return;
+    if (SAFIsSystemOrThirdParty([vc class])) {
+        SAFLog(@"⏭️ 跳过系统/三方 VC: %@", NSStringFromClass([vc class]));
+        return;
+    }
 
     /* 容器自身交给 UIKit 处理 */
     if ([vc isKindOfClass:[UINavigationController class]] ||
