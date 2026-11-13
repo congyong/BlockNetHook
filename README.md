@@ -1,10 +1,22 @@
 # BlockNetPlus
 
-基于 [congyong/BlockNetHook](https://github.com/congyong/BlockNetHook) 扩展的可配置网络拦截 dylib。
+基于 [congyong/BlockNetHook](https://github.com/congyong/BlockNetHook) 扩展的可配置网络拦截 dylib，
+并附带一套 **刘海屏 / 灵动岛 / Home Indicator 安全区适配**（`SafeAreaFix.m`）。
+
 原仓库用纯 ObjC runtime hook 拒掉 `umeng.com` / `umengcloud.com` 请求，
 解决「指尖浏览器」（鲨鱼浏览器，开发者 Finger Joint）启动时因友盟响应异常导致的闪退。
 
-本插件**完整保留原项目的 HookMethod 架构与默认行为**，并扩展成一套分层拦截框架。
+本插件**完整保留原项目的 HookMethod 架构与默认行为**，并扩展成一套分层拦截框架，
+同时补上指尖浏览器Pro 1.9 完全缺失的安全区适配。
+
+## 两个产物
+
+| 文件 | 内容 | 适用场景 |
+| --- | --- | --- |
+| `BlockNetPlus.dylib` | 广告拦截 **+** 安全区适配 | 想两者都要 |
+| `SafeAreaFix.dylib` | **仅**安全区适配 | 只想修刘海屏布局，完全不碰网络层 |
+
+两个都是 fat dylib（arm64 + arm64e），可以只装一个，也可以同时加载。
 
 ## 做了什么
 
@@ -15,6 +27,7 @@
 | 配置修复 | 把 `BNPBlockProtocol` 注入 `NSURLSessionConfiguration.protocolClasses` —— `registerClass:` 对自定义 session 不生效，这是原项目的盲点 |
 | C 层兜底 | fishhook rebind `getaddrinfo`，覆盖绕开 NSURLSession 直接用 socket / CFNetwork 的广告 SDK |
 | 本机服务 | hook `GCDWebServer` 的 `start` / `startWithOptions:error:` / `startWithPort:bonjourName:` 返回 `NO`，禁用 GCDWebUploader 的 WiFi 传文件服务 |
+| 安全区适配 | `UIViewController.viewDidLoad` / `viewWillAppear:` / `viewDidLayoutSubviews` 收缩 `edgesForExtendedLayout`；`WKWebView` 强制 `contentInsetAdjustmentBehavior = .always` |
 
 默认档 `standard` 拦截友盟、穿山甲/ABU、百度 Mobads、广点通、乐播广告、极光统计共 6 类 20 条后缀规则；`strict` 追加 13 条后共 33 条。
 规则来源是对 `meiyu_browser_9.3.ipa` 主二进制的静态提取，详见 `规则清单.md`。
@@ -26,7 +39,8 @@
 
 ```
 BlockNetPlus/
-├── BlockNetPlus.m                  插件源码（唯一需要编译的 ObjC 文件）
+├── BlockNetPlus.m                  插件源码（网络拦截部分）
+├── SafeAreaFix.m                   插件源码（安全区适配部分）
 ├── Makefile                        macOS 本地编译
 ├── .github/workflows/build.yml     GitHub Actions 自动编译 + 发布 Release
 ├── .gitignore                      排除编译产物与运行时下载的 fishhook
@@ -35,6 +49,83 @@ BlockNetPlus/
 ```
 
 `fishhook.c` / `fishhook.h` 由 Makefile 与 CI 在编译时从 `facebook/fishhook` 自动下载，不入库。
+
+## 安全区适配（`SafeAreaFix.m`）
+
+### 问题
+
+指尖浏览器Pro 1.9 建于 2018 年（iOS 11.1 SDK），对其主二进制逐项实测：
+
+| API | 引用次数 |
+| --- | --- |
+| `safeAreaInsets` | **0** |
+| `safeAreaLayoutGuide` | **0** |
+| `viewSafeAreaInsetsDidChange` | **0** |
+| `topLayoutGuide` / `bottomLayoutGuide` | **0** |
+| `contentInsetAdjustmentBehavior` | **0** |
+| `edgesForExtendedLayout` | 2（只用了 iOS 7 的老 API） |
+| `UIScreen` / `bounds` | 4 / 84（布局全部基于屏幕物理尺寸） |
+
+配套证据：`Info.plist` 的 `UILaunchImages` 只覆盖到 iPhone X（375×812pt），
+390×844 / 393×852 / 414×896 / 430×932 / 440×956 全部缺失。
+
+结论：这个 App 出生在安全区概念普及之前，布局一律按 `UIScreen.main.bounds` 硬算，
+从不读安全区。iOS 13+ 把这类旧 App 铺满全屏后 —— 顶栏压进刘海/灵动岛、
+底栏压进 Home Indicator，**上下两端的按钮点不到**。
+
+### 修法
+
+只做「系统本该替它做」的补正，不改业务逻辑：
+
+1. **收缩 `edgesForExtendedLayout`**
+   hook `UIViewController.viewDidLoad` / `viewWillAppear:` / `viewDidLayoutSubviews`，
+   在原实现之后把 `edgesForExtendedLayout` 的 Top/Bottom 位剥离。
+   UIKit 随即把 `VC.view` 收缩进安全区；因为 App 内部元素是**相对 view** 布局的
+   （view 尺寸变了但相对坐标不变），顶栏自动下移到刘海下方、底栏自动上移到
+   Home Indicator 上方 —— 一次设置，全页生效。
+
+2. **`WKWebView` 的 inset**
+   WKWebView 默认 `contentInsetAdjustmentBehavior = .automatic`，而 `.automatic`
+   在 WKWebView 内不会真正加 inset，网页内容会被 Home Indicator 盖住（WebKit 的经典坑）。
+   hook `WKWebView` 的 `initWithFrame:` / `initWithCoder:`，强制设为 `.always`。
+
+### 安全阀
+
+- **只在 `window.safeAreaInsets` 非零的设备上动作。**
+  iPhone SE / 8 这类无刘海机型如果也设 `edgesForExtendedLayout = None`，
+  view 会从 status bar 下方开始，App 写死的顶部坐标反而被遮挡 —— 必须避免。
+- `UINavigationController` / `UITabBarController` / `UISplitViewController` /
+  `UIPageViewController` 自身跳过，它们内部已由 UIKit 处理。
+- view 尚未上屏（`view.window == nil`）时推迟到下一轮 runloop 重试。
+- **不链接 `WebKit.framework`**：`WKWebView` 走 `NSClassFromString` + `objc_msgSend`，
+  不为一个可选功能引入额外框架依赖。
+- **不依赖 CydiaSubstrate / ElleKit**：hook 用 objc runtime 的 `method_setImplementation`
+  实现，与 `BlockNetPlus.m` 同一套思路，LiveContainer 外置 dylib 即可生效，无需越狱。
+
+### 配置
+
+| Key | 默认 | 说明 |
+| --- | --- | --- |
+| `SAF_LOG` | `1` | 设 `0` 静默 |
+| `SAF_MODE` | `auto` | `auto`（仅刘海设备生效）/ `off`（完全关闭）/ `force`（无视设备检查） |
+| `SAF_NAV` | `auto` | `auto` / `nav`（一律收缩含导航栏容器的 VC）/ `bare`（一律只处理裸 VC） |
+| `SAF_WEBVIEW` | `1` | 设 `0` 关闭 WKWebView inset 修正 |
+
+### 验证
+
+设备日志搜索 `[SafeAreaFix]`：
+
+```
+[SafeAreaFix] ✅ loading (5 hooks installed) — 指尖浏览器安全区适配已启用
+[SafeAreaFix] ✅ ZJBrowserNavigationController edges 15→0 (safeArea top=59 bottom=34) [applied=1]
+[SafeAreaFix] ℹ️ WKWebView contentInsetAdjustmentBehavior → always
+```
+
+`edges 15→0` 表示 `UIRectEdgeAll` 被收成 `UIRectEdgeNone`，`safeArea top=59` 是刘海机型的典型值。
+如果看到 `edges 15→3`（只剥离 Top/Bottom、保留左右）也是正常的 —— 左右位在竖屏下无意义，
+由 UIKit 按当前方向自行处理。
+
+若某个页面仍然偏紧，用 `SAF_NAV=bare` 或 `SAF_NAV=nav` 调整适用范围后重试。
 
 ## 编译
 
@@ -48,7 +139,8 @@ BlockNetPlus/
 
 1. 向 `blocknetplus` 分支 push 即自动触发 `Build BlockNetPlus dylib`。
 2. 也可在 Actions 里用 `workflow_dispatch` 手动触发。
-3. 产物在自动创建的 Release 里：`BlockNetPlus.dylib`（arm64 + arm64e fat）。
+3. 产物在自动创建的 Release 里：`BlockNetPlus.dylib`（一体版）与 `SafeAreaFix.dylib`（独立安全区版），
+   都是 arm64 + arm64e fat。
 
 **方式 B：macOS 本地**
 
@@ -66,7 +158,8 @@ make clean      # 清理产物
 
 沿用原仓库的方式（LiveContainer，无需重签）：
 
-1. LiveContainer → **Tweaks** → `+` → **Import Tweak** → 选 `BlockNetPlus.dylib`。
+1. LiveContainer → **Tweaks** → `+` → **Import Tweak** → 选 `BlockNetPlus.dylib`
+   （只想修安全区就选 `SafeAreaFix.dylib`）。
 2. 放到全局 Tweak 目录，或只放进鲨鱼浏览器的应用目录。
 3. 在 App 设置里设置 **Tweak Folder**，重新启动生效。
 

@@ -31,18 +31,23 @@ jobs:
       - name: Build arm64 + arm64e fat dylib
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          COMMON=(
-            BlockNetPlus.m fishhook.c
-            -isysroot "$SDK"
-            -fobjc-arc
-            -framework Foundation
-            -DBNP_USE_FISHHOOK=1
+          WARN=(
             -Wall
             -Wno-unknown-warning-option
             -Wno-unused-function
             -Wno-deprecated-declarations
             -Wno-cast-function-type-strict
             -Wno-cast-function-type
+          )
+
+          # ── 一体版：广告拦截 + 安全区适配 ────────────────────────────────
+          COMMON=(
+            BlockNetPlus.m SafeAreaFix.m fishhook.c
+            -isysroot "$SDK"
+            -fobjc-arc
+            -framework Foundation
+            -DBNP_USE_FISHHOOK=1
+            "${WARN[@]}"
           )
 
           clang -dynamiclib "${COMMON[@]}" -arch arm64 \
@@ -54,8 +59,30 @@ jobs:
           lipo -create BlockNetPlus_arm64.dylib BlockNetPlus_arm64e.dylib \
             -output BlockNetPlus.dylib
 
-          echo "=== lipo info ==="; lipo -info BlockNetPlus.dylib
-          echo "=== file ==="; file BlockNetPlus.dylib
+          # ── 独立版：仅安全区适配（最小侵入，不碰网络层）─────────────────
+          SAFONLY=(
+            SafeAreaFix.m
+            -isysroot "$SDK"
+            -fobjc-arc
+            -framework Foundation
+            "${WARN[@]}"
+          )
+
+          clang -dynamiclib "${SAFONLY[@]}" -arch arm64 \
+            -miphoneos-version-min=13.0 -o SafeAreaFix_arm64.dylib
+
+          clang -dynamiclib "${SAFONLY[@]}" -arch arm64e \
+            -miphoneos-version-min=13.0 -o SafeAreaFix_arm64e.dylib
+
+          lipo -create SafeAreaFix_arm64.dylib SafeAreaFix_arm64e.dylib \
+            -output SafeAreaFix.dylib
+
+          echo "=== lipo info ==="
+          lipo -info BlockNetPlus.dylib
+          lipo -info SafeAreaFix.dylib
+          echo "=== file ==="
+          file BlockNetPlus.dylib
+          file SafeAreaFix.dylib
 
       - name: Static sanity check
         run: |
@@ -65,8 +92,32 @@ jobs:
           assert 'BlockNetPlusInit' in s, 'missing constructor'
           assert 'getaddrinfo' in s, 'missing C-level hook'
           assert 'GCDWebServer' in s, 'missing local-server hook'
-          print('source sanity check passed')
+          print('BlockNetPlus.m sanity check passed')
+
+          f = open('SafeAreaFix.m', encoding='utf-8').read()
+          assert f.count('{') == f.count('}'), 'unbalanced braces (SafeAreaFix)'
+          assert 'SafeAreaFixInit' in f, 'missing constructor (SafeAreaFix)'
+          assert 'edgesForExtendedLayout' in f, 'missing safe-area fix (SafeAreaFix)'
+          assert 'setContentInsetAdjustmentBehavior' in f, 'missing WKWebView inset (SafeAreaFix)'
+          assert '#import <WebKit/WebKit.h>' not in f, 'must not import WebKit header'
+          yml = open('.github/workflows/build.yml', encoding='utf-8').read()
+          import re as _re
+          blocks = _re.findall(r'(?:COMMON|SAFONLY)=\(([^)]*)\)', yml)
+          assert blocks, 'cannot locate compile flag blocks'
+          for _b in blocks:
+              assert 'WebKit' not in _b, 'must not link WebKit framework'
+          print('SafeAreaFix.m sanity check passed')
           PY
+
+      - name: Verify exported symbols
+        run: |
+          echo "=== BlockNetPlus.dylib ==="
+          nm -m BlockNetPlus.dylib | grep -E 'BlockNetPlusInit|hook_getaddrinfo' || true
+          echo "=== SafeAreaFix.dylib ==="
+          nm -m SafeAreaFix.dylib | grep -E 'SafeAreaFixInit' || true
+          echo "=== architectures ==="
+          lipo -info BlockNetPlus.dylib
+          lipo -info SafeAreaFix.dylib
 
       # Release asset 的 glob 对中文文件名会退化成 default.md，先复制成 ASCII 名
       - name: Normalize release asset names
@@ -80,7 +131,41 @@ jobs:
           body: |
             ## BlockNetPlus ${{ env.VERSION }}
 
-            基于 [congyong/BlockNetHook](https://github.com/congyong/BlockNetHook) 扩展的广告 / 追踪拦截 dylib。
+            基于 [congyong/BlockNetHook](https://github.com/congyong/BlockNetHook) 扩展的
+            广告 / 追踪拦截 + 安全区适配 dylib。
+
+            ### 两个产物
+
+            | 文件 | 内容 | 适用场景 |
+            |---|---|---|
+            | `BlockNetPlus.dylib` | 广告拦截 + 安全区适配 | 想两者都要 |
+            | `SafeAreaFix.dylib` | 仅安全区适配 | 只想修刘海屏布局，不碰网络层 |
+
+            **两个都是 fat dylib（arm64 + arm64e），可同时加载。**
+
+            ### 安全区适配做了什么
+
+            指尖浏览器Pro 1.9 建于 2018 年（iOS 11.1 SDK），主二进制实测：
+            `safeAreaInsets` / `safeAreaLayoutGuide` / `viewSafeAreaInsetsDidChange` /
+            `contentInsetAdjustmentBehavior` **全部 0 次引用**，布局一律按
+            `UIScreen.main.bounds` 硬算。iOS 13+ 把这类旧 App 铺满全屏后，
+            顶栏压进刘海/灵动岛、底栏压进 Home Indicator，按钮点不到。
+
+            修法（不改业务逻辑）：
+            - hook `UIViewController.viewDidLoad` / `viewWillAppear:` /
+              `viewDidLayoutSubviews`，在原实现后把 `edgesForExtendedLayout`
+              剥离 Top/Bottom 位 → UIKit 把 VC.view 收缩进安全区，
+              App 内部相对布局随之整体落位
+            - hook `WKWebView` 初始化，强制 `contentInsetAdjustmentBehavior = .always`
+              → 网页内容避开底部 Home Indicator（WebKit 的经典坑）
+            - 安全阀：仅在 `window.safeAreaInsets` 非零的设备上动作，
+              iPhone SE / 8 等无刘海机型完全不受影响
+
+            可调开关（App 内 NSUserDefaults）：
+            `SAF_LOG=0` 关日志 · `SAF_MODE=off` 关闭 · `SAF_NAV=bare|nav` 调整适用范围 ·
+            `SAF_WEBVIEW=0` 关闭 WKWebView inset 修正
+
+            ### 广告拦截部分
 
             - 三档规则：loose / standard(默认) / strict
             - ObjC 层：NSURLSession 12 个 task 工厂、NSURLConnection、NSData、WKWebView、NSURLProtocol
@@ -89,13 +174,16 @@ jobs:
             - 默认禁用 GCDWebServer 本机 HTTP 服务（WiFi 传文件）
             - 硬编码白名单保护 IAP / 订阅 / 登录接口，不干预付费逻辑
 
-            安装：LiveContainer → Tweaks → `+` → Import Tweak → 选择 `BlockNetPlus.dylib` →
-            在 App 设置中设置 Tweak Folder。设备日志搜索 `[BlockNet+]`，
+            ### 安装（LiveContainer 外置 dylib）
+
+            LiveContainer → Tweaks → `+` → Import Tweak → 选择 dylib →
+            在 App 设置中设置 Tweak Folder。设备日志搜索 `[BlockNet+]` / `[SafeAreaFix]`，
             看到 `✅ N hooks installed` 即加载成功。
 
             配置开关见仓库 `规则清单.md`。
           files: |
             BlockNetPlus.dylib
+            SafeAreaFix.dylib
             README.md
             RULES.md
         env:
