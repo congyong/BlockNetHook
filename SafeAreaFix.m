@@ -234,15 +234,16 @@ static void SAFConfigureWebView(id webView) {
     if (!scrollViewClass || !scrollViewSel) return;
     if (![webView respondsToSelector:scrollViewSel]) return;
 
-    id (*msgSend)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+    /* 可变参数版 msgSend，避免强转成固定参数原型 */
+    id (*msgSend)(id, SEL, ...) = (id (*)(id, SEL, ...))objc_msgSend;
+
     id scrollView = msgSend(webView, scrollViewSel);
     if (!scrollView) return;
 
     SEL behaviorSel = NSSelectorFromString(@"setContentInsetAdjustmentBehavior:");
     if (![scrollView respondsToSelector:behaviorSel]) return;
 
-    void (*msgSendInt)(id, SEL, NSInteger) = (void (*)(id, SEL, NSInteger))objc_msgSend;
-    msgSendInt(scrollView, behaviorSel, (NSInteger)2);   /* UIScrollViewContentInsetAdjustmentAlways */
+    msgSend(scrollView, behaviorSel, (NSInteger)2);   /* UIScrollViewContentInsetAdjustmentAlways */
 
     SAFLog(@"ℹ️ WKWebView contentInsetAdjustmentBehavior → always");
 }

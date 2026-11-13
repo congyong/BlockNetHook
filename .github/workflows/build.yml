@@ -28,9 +28,26 @@ jobs:
           curl -fsSL -o fishhook.c https://raw.githubusercontent.com/facebook/fishhook/main/fishhook.c
           curl -fsSL -o fishhook.h https://raw.githubusercontent.com/facebook/fishhook/main/fishhook.h
 
+      - name: Syntax check (errors surfaced as annotations)
+        run: |
+          set -o pipefail
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          set +e
+          clang -fsyntax-only -isysroot "$SDK" -fobjc-arc -framework Foundation \
+            -DBNP_USE_FISHHOOK=1 BlockNetPlus.m SafeAreaFix.m fishhook.c \
+            > /tmp/syntax.log 2>&1
+          rc=$?
+          cat /tmp/syntax.log
+          grep -E "error:" /tmp/syntax.log | head -40 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          exit $rc
+
       - name: Build arm64 + arm64e fat dylib
         run: |
+          set -o pipefail
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          trap 'grep -E "error:" /tmp/build.log 2>/dev/null | head -40 | while IFS= read -r l; do echo "::error::$l"; done' ERR
           WARN=(
             -Wall
             -Wno-unknown-warning-option
@@ -50,11 +67,11 @@ jobs:
             "${WARN[@]}"
           )
 
-          clang -dynamiclib "${COMMON[@]}" -arch arm64 \
-            -miphoneos-version-min=13.0 -o BlockNetPlus_arm64.dylib
+          { clang -dynamiclib "${COMMON[@]}" -arch arm64 \
+            -miphoneos-version-min=13.0 -o BlockNetPlus_arm64.dylib; } 2>&1 | tee -a /tmp/build.log
 
-          clang -dynamiclib "${COMMON[@]}" -arch arm64e \
-            -miphoneos-version-min=13.0 -o BlockNetPlus_arm64e.dylib
+          { clang -dynamiclib "${COMMON[@]}" -arch arm64e \
+            -miphoneos-version-min=13.0 -o BlockNetPlus_arm64e.dylib; } 2>&1 | tee -a /tmp/build.log
 
           lipo -create BlockNetPlus_arm64.dylib BlockNetPlus_arm64e.dylib \
             -output BlockNetPlus.dylib
@@ -68,11 +85,11 @@ jobs:
             "${WARN[@]}"
           )
 
-          clang -dynamiclib "${SAFONLY[@]}" -arch arm64 \
-            -miphoneos-version-min=13.0 -o SafeAreaFix_arm64.dylib
+          { clang -dynamiclib "${SAFONLY[@]}" -arch arm64 \
+            -miphoneos-version-min=13.0 -o SafeAreaFix_arm64.dylib; } 2>&1 | tee -a /tmp/build.log
 
-          clang -dynamiclib "${SAFONLY[@]}" -arch arm64e \
-            -miphoneos-version-min=13.0 -o SafeAreaFix_arm64e.dylib
+          { clang -dynamiclib "${SAFONLY[@]}" -arch arm64e \
+            -miphoneos-version-min=13.0 -o SafeAreaFix_arm64e.dylib; } 2>&1 | tee -a /tmp/build.log
 
           lipo -create SafeAreaFix_arm64.dylib SafeAreaFix_arm64e.dylib \
             -output SafeAreaFix.dylib
