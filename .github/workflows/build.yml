@@ -28,45 +28,67 @@ jobs:
           curl -fsSL -o fishhook.c https://raw.githubusercontent.com/facebook/fishhook/main/fishhook.c
           curl -fsSL -o fishhook.h https://raw.githubusercontent.com/facebook/fishhook/main/fishhook.h
 
-      - name: Syntax check (errors surfaced as annotations)
+      # ── 语法检查 ──────────────────────────────────────────────────────────
+      # 失败时把 clang 的 error: 行用 ::error:: 注解抛出，GitHub run 页面的
+      # Annotations 区域就能直接看到，不用去翻完整日志（logs API 需要 token）。
+      - name: Syntax check
         run: |
-          set -o pipefail
-          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           set +e
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           clang -fsyntax-only -isysroot "$SDK" -fobjc-arc -framework Foundation \
             -DBNP_USE_FISHHOOK=1 BlockNetPlus.m SafeAreaFix.m fishhook.c \
             > /tmp/syntax.log 2>&1
           rc=$?
-          cat /tmp/syntax.log
-          grep -E "error:" /tmp/syntax.log | head -40 | while IFS= read -r line; do
-            echo "::error::$line"
+          {
+            echo "### Syntax check (rc=$rc)"
+            echo '```'
+            cat /tmp/syntax.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          { grep -E "error:" /tmp/syntax.log || true; } | head -40 | while IFS= read -r l; do
+            echo "::error::$l"
           done
           exit $rc
 
+      # ── 链接检查（逐个 dylib）────────────────────────────────────────────
+      # 定位到底是哪个 dylib 链接失败；顺带把完整链接日志写进 job summary。
       - name: Link check each dylib separately
         run: |
-          set -o pipefail
+          set +e
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           rc=0
+          : > /tmp/link.log
           for spec in "BlockNetPlus.m fishhook.c" "SafeAreaFix.m"; do
-            echo "=== linking: $spec ==="
-            { clang -dynamiclib $spec -isysroot "$SDK" -fobjc-arc -framework Foundation \
-                -lobjc -DBNP_USE_FISHHOOK=1 -arch arm64 -miphoneos-version-min=13.0 \
-                -o /tmp/linktest.dylib; } 2>&1 | tee -a /tmp/link.log || rc=1
+            echo "=== linking: $spec ===" >> /tmp/link.log
+            clang -dynamiclib $spec -isysroot "$SDK" -fobjc-arc -framework Foundation \
+              -lobjc -DBNP_USE_FISHHOOK=1 -arch arm64 -miphoneos-version-min=13.0 \
+              -o /tmp/linktest.dylib >> /tmp/link.log 2>&1
+            if [ $? -ne 0 ]; then rc=1; fi
           done
-          echo "=== link log ==="
-          cat /tmp/link.log
-          grep -nE "error:|Undefined symbol|symbol\(s\) not found|duplicate symbol|ld: " /tmp/link.log 2>/dev/null | head -30 | while IFS= read -r l; do echo "::error::$l"; done
-          grep -A 10 "Undefined symbols" /tmp/link.log 2>/dev/null | head -16 | while IFS= read -r l; do echo "::error::ctx: $l"; done
+          {
+            echo "### Link check (rc=$rc)"
+            echo '```'
+            cat /tmp/link.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          { grep -nE "error:|Undefined symbol|not found|duplicate symbol|ld: " /tmp/link.log || true; } | head -30 | while IFS= read -r l; do
+            echo "::error::$l"
+          done
+          { grep -A 10 "Undefined symbols" /tmp/link.log || true; } | head -16 | while IFS= read -r l; do
+            echo "::error::ctx: $l"
+          done
           exit $rc
 
+      # ── 正式构建 ──────────────────────────────────────────────────────────
       - name: Build arm64 + arm64e fat dylib
         run: |
-          set -o pipefail
+          set +e
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          : > /tmp/build.log
           trap '
-            grep -nE "error:|Undefined symbol|symbol\(s\) not found|duplicate symbol|ld: |not found for arch|framework not found|library not found" /tmp/build.log 2>/dev/null | head -30 | while IFS= read -r l; do echo "::error::$l"; done
-            grep -A 10 "Undefined symbols" /tmp/build.log 2>/dev/null | head -16 | while IFS= read -r l; do echo "::error::ctx: $l"; done
+            { grep -nE "error:|Undefined symbol|not found|duplicate symbol|ld: " /tmp/build.log 2>/dev/null || true; } | head -30 | while IFS= read -r l; do echo "::error::$l"; done
+            { grep -A 10 "Undefined symbols" /tmp/build.log 2>/dev/null || true; } | head -16 | while IFS= read -r l; do echo "::error::ctx: $l"; done
+            { tail -60 /tmp/build.log 2>/dev/null || true; } | while IFS= read -r l; do echo "::error::log: $l"; done
           ' ERR
           WARN=(
             -Wall
@@ -88,11 +110,13 @@ jobs:
             "${WARN[@]}"
           )
 
-          { clang -dynamiclib "${COMMON[@]}" -arch arm64 \
-            -miphoneos-version-min=13.0 -o BlockNetPlus_arm64.dylib; } 2>&1 | tee -a /tmp/build.log
+          clang -dynamiclib "${COMMON[@]}" -arch arm64 \
+            -miphoneos-version-min=13.0 -o BlockNetPlus_arm64.dylib >> /tmp/build.log 2>&1
+          if [ $? -ne 0 ]; then cat /tmp/build.log; exit 1; fi
 
-          { clang -dynamiclib "${COMMON[@]}" -arch arm64e \
-            -miphoneos-version-min=13.0 -o BlockNetPlus_arm64e.dylib; } 2>&1 | tee -a /tmp/build.log
+          clang -dynamiclib "${COMMON[@]}" -arch arm64e \
+            -miphoneos-version-min=13.0 -o BlockNetPlus_arm64e.dylib >> /tmp/build.log 2>&1
+          if [ $? -ne 0 ]; then cat /tmp/build.log; exit 1; fi
 
           lipo -create BlockNetPlus_arm64.dylib BlockNetPlus_arm64e.dylib \
             -output BlockNetPlus.dylib
@@ -107,14 +131,28 @@ jobs:
             "${WARN[@]}"
           )
 
-          { clang -dynamiclib "${SAFONLY[@]}" -arch arm64 \
-            -miphoneos-version-min=13.0 -o SafeAreaFix_arm64.dylib; } 2>&1 | tee -a /tmp/build.log
+          clang -dynamiclib "${SAFONLY[@]}" -arch arm64 \
+            -miphoneos-version-min=13.0 -o SafeAreaFix_arm64.dylib >> /tmp/build.log 2>&1
+          if [ $? -ne 0 ]; then cat /tmp/build.log; exit 1; fi
 
-          { clang -dynamiclib "${SAFONLY[@]}" -arch arm64e \
-            -miphoneos-version-min=13.0 -o SafeAreaFix_arm64e.dylib; } 2>&1 | tee -a /tmp/build.log
+          clang -dynamiclib "${SAFONLY[@]}" -arch arm64e \
+            -miphoneos-version-min=13.0 -o SafeAreaFix_arm64e.dylib >> /tmp/build.log 2>&1
+          if [ $? -ne 0 ]; then cat /tmp/build.log; exit 1; fi
 
           lipo -create SafeAreaFix_arm64.dylib SafeAreaFix_arm64e.dylib \
             -output SafeAreaFix.dylib
+
+          {
+            echo "### Build log"
+            echo '```'
+            cat /tmp/build.log
+            echo '```'
+            echo "### lipo info"
+            echo '```'
+            lipo -info BlockNetPlus.dylib
+            lipo -info SafeAreaFix.dylib
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
           echo "=== lipo info ==="
           lipo -info BlockNetPlus.dylib
@@ -193,7 +231,7 @@ jobs:
       - name: Verify exported symbols
         run: |
           echo "=== BlockNetPlus.dylib ==="
-          nm -m BlockNetPlus.dylib | grep -E 'BlockNetPlusInit|hook_getaddrinfo' || true
+          nm -m BlockNetPlus.dylib | grep -E 'BlockNetPlusInit|SafeAreaFixInit|hook_getaddrinfo' || true
           echo "=== SafeAreaFix.dylib ==="
           nm -m SafeAreaFix.dylib | grep -E 'SafeAreaFixInit' || true
           echo "=== architectures ==="
