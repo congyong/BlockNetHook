@@ -1,0 +1,17 @@
+# 编译产物（CI 发布在 Release 中，不入库）
+*.dylib
+*.o
+*.a
+build/
+dist/
+
+# fishhook 源码由 make deps / CI 运行时拉取
+fishhook.c
+fishhook.h
+
+# 系统与编辑器
+.DS_Store
+*.xcworkspace
+xcuserdata/
+.vscode/
+.idea/
