@@ -165,6 +165,10 @@ static void SAFDoApply(id obj);
 /* WKWebView hook 的延迟补装（定义在文件后段） */
 static void SAFEnsureWebViewHook(void);
 
+/* SAFScheduleRetry 会回调它，而它的定义在后面 —— 必须先声明。
+   C99 起隐式函数声明是编译错误（-Wimplicit-function-declaration）。 */
+static void SAFApplyToViewController(id obj);
+
 static void SAFScheduleRetry(UIViewController *vc) {
     if (g_retryCount >= 8) return;   /* 全局上限，别无限排程 */
 
@@ -294,6 +298,11 @@ static void SAF_hook_viewWillAppear(id self, SEL _cmd, BOOL animated) {
    init hook 就永远装不上（表现为网页内容不避让 Home Indicator）。
    所以在每次 VC 出现时补装一次。 */
 static BOOL g_webViewHooked = NO;
+
+/* ★ 前向声明：下面 SAFEnsureWebViewHook 会用到这两个 hook 函数，
+   而它们的定义在更后面。C99 起隐式函数声明是错误，必须显式声明。 */
+static id SAF_hook_WKInitWithFrame(id self, SEL _cmd, CGRect frame);
+static id SAF_hook_WKInitWithCoder(id self, SEL _cmd, NSCoder *coder);
 
 static void SAFEnsureWebViewHook(void) {
     if (g_webViewHooked) return;

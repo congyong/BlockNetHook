@@ -241,6 +241,19 @@ jobs:
           assert 'isViewLoaded' in f, 'must guard view access with isViewLoaded'
           assert 'SAFProtected' in f, 'hook bodies must be exception-guarded'
           print('SafeAreaFix.m v2 hardening assertions passed')
+
+          # 声明先于使用：C99 起隐式函数声明是编译错误
+          # （踩过的坑：SAFApplyToViewController / SAF_hook_WKInitWithFrame
+          #   先被调用后定义 → 'use of undeclared identifier'）
+          _lines = f.split('\n')
+          _names = set(_r.findall(r'^static\s+[\w\s\*]*?\b(\w+)\s*\(', f, _r.M))
+          for _n in sorted(_names):
+              for _i, _l in enumerate(_lines):
+                  if _r.search(r'\b' + _r.escape(_n) + r'\s*\(', _l):
+                      assert _l.strip().startswith('static'), \
+                          f'{_n} first used at line {_i+1} before its declaration: {_l.strip()[:80]}'
+                      break
+          print('SafeAreaFix.m declaration-before-use check passed')
           PY
 
       - name: Verify exported symbols
