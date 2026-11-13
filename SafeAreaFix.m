@@ -1,5 +1,5 @@
 /**
- * SafeAreaFix.m  ->  SafeAreaFix.dylib
+ * SafeAreaFix.m  ->  SafeAreaFix.dylib   (v2 加固版)
  *
  * 为「指尖浏览器 / 指尖浏览器Pro 1.9」（bundle: com.app.scanapppro）补上
  * 刘海屏 / 灵动岛 / Home Indicator / 圆角屏的安全区适配。
@@ -20,31 +20,50 @@
  *         · 底栏按钮压进 Home Indicator
  *       → 上下两端按钮点不到。
  *
- *   配套证据：Info.plist 的 UILaunchImages 只覆盖到 iPhone X（375×812pt），
- *   390×844 / 393×852 / 414×896 / 430×932 / 440×956 全部缺失。
+ * ── v2 加固：修掉 v1 会导致「点击设置闪退」的四个缺陷 ─────────────────────
+ *   缺陷 1【致命·递归崩溃】
+ *     v1 在 viewDidLayoutSubviews 回调里调用 [view layoutIfNeeded]。
+ *     UIKit 明确禁止在 layout pass 中调 layoutIfNeeded —— 会无限递归，
+ *     表现为「进设置页闪退」。v2 彻底不再 hook viewDidLayoutSubviews。
+ *
+ *   缺陷 2【致命·递归重入】
+ *     v1 先执行 edgesForExtendedLayout = stripped（setter 内部会触发
+ *     setNeedsLayout，可能同步重入 layout 回调），再打 associated object 标记。
+ *     重入时标记还没设 → 再次进入 → 再次 setter → 无限递归。
+ *     v2 把标记提到 setter 之前。
+ *
+ *   缺陷 3【ABI 错误·行为未定义】
+ *     v1 的 viewWillAppear: 钩子把 BOOL animated 声明成 id。
+ *     arm64 calling convention 下这是 UB —— 寄存器里的 BOOL 会被当指针解释。
+ *     v2 改成正确的 BOOL。
+ *
+ *   缺陷 4【风险·主动触发 view 加载】
+ *     v1 到处直接访问 vc.view，会在 view 尚未加载时触发 loadView，
+ *     在 viewDidLoad 上下文中极易重入。v2 一律先用 isViewLoaded 判断，
+ *     且只在 VC 真正上屏（view.window != nil）时才动手。
+ *
+ *   另外：v2 给所有 hook 套了 @try/@catch，任何 NSException 都不会外泄成崩溃；
+ *   延后重试有次数上限，不会无限排程。
  *
  * ── 修法（只做「系统本该替它做」的补正，不改业务逻辑）──────────────────────
- *   1. UIViewController.viewDidLoad / viewWillAppear: / viewDidLayoutSubviews
- *      → 在原实现之后把 edgesForExtendedLayout 收成「不含 Top/Bottom」，
- *        UIKit 随即把 VC.view 收缩进安全区。因为 App 内部元素是相对 view
- *        布局的（view 尺寸变了但相对坐标不变），顶栏自动下移到刘海下方、
- *        底栏自动上移到 Home Indicator 上方 —— 一次设置，全页生效。
+ *   1. 只在 VC 已经上屏且设备确有安全区时，把 edgesForExtendedLayout 的
+ *      Top/Bottom 位剥离 → UIKit 把 VC.view 收缩进安全区。App 内部元素是
+ *      相对 view 布局的，view 尺寸变了但相对坐标不变，所以顶栏自动下移到
+ *      刘海下方、底栏自动上移到 Home Indicator 上方 —— 一次设置，全页生效。
  *
- *   2. WKWebView 初始化后强制 contentInsetAdjustmentBehavior = .always
- *        WKWebView 默认是 .automatic，而 .automatic 在 WKWebView 内不会真正
- *        加 inset，网页内容会被 Home Indicator 盖住。这是 WebKit 的经典坑。
+ *   2. WKWebView 初始化后（延后一轮 runloop）强制
+ *      contentInsetAdjustmentBehavior = .always，让网页内容避开底部横条。
+ *      WKWebView 默认 .automatic，而 .automatic 在 WKWebView 内不会真正加 inset。
  *
- * ── 安全阀（重要）─────────────────────────────────────────────────────────
- *   · 只有当设备真实存在安全区（window.safeAreaInsets 非零）时才动作。
- *     iPhone SE / 8 这类无刘海机型上如果也设 edgesForExtendedLayout = None，
- *     view 会从 status bar 下方开始，App 写死的顶部坐标反而会被遮挡 —— 必须避免。
- *   · UIViewController / UINavigationController / UITabBarController 自身跳过，
- *     它们内部已由 UIKit 处理。
+ * ── 安全阀 ────────────────────────────────────────────────────────────────
+ *   · 只有 window.safeAreaInsets 非零的设备才动作。
+ *     iPhone SE / 8 这类无刘海机型如果也设 edgesForExtendedLayout = None，
+ *     view 会从 status bar 下方开始，App 写死的顶部坐标反而被遮挡。
+ *   · UIViewController / UINavigationController / UITabBarController /
+ *     UISplitViewController / UIPageViewController 自身跳过。
  *   · 不依赖 CydiaSubstrate / ElleKit：hook 用 objc runtime 的
- *     method_setImplementation 实现，与同仓库 BlockNetPlus.m 同一套思路，
- *     因此 LiveContainer 外置 dylib 即可生效，无需越狱。
- *   · 不链接 WebKit.framework：WKWebView 走 NSClassFromString + objc_msgSend，
- *     避免为一个可选功能引入额外框架依赖。
+ *     method_setImplementation 实现，LiveContainer 外置 dylib 即可生效。
+ *   · 不链接 WebKit.framework：WKWebView 走 NSClassFromString + objc_msgSend。
  *
  * ── 可调开关（App 内 NSUserDefaults）──────────────────────────────────────
  *   SAF_LOG        "0" 关闭日志（默认开）
@@ -81,6 +100,12 @@ static BOOL SAFLoggingEnabled(void) {
     if (SAFLoggingEnabled()) NSLog((@"[SafeAreaFix] " fmt), ##__VA_ARGS__); \
 } while (0)
 
+/* 所有 hook 主体都套上：任何 NSException 都不允许外泄成崩溃 */
+#define SAFProtected(body) do { \
+    @try { body } \
+    @catch (NSException *e) { SAFLog(@"⚠️ 捕获异常 %@: %@", e.name, e.reason); } \
+} while (0)
+
 static NSString *SAFConfigValue(NSString *key, NSString *fallback) {
     NSString *v = [[NSUserDefaults standardUserDefaults] stringForKey:key];
     if (v.length == 0) v = fallback;
@@ -103,24 +128,27 @@ static BOOL SAFHook(Class cls, SEL sel, IMP newImp, IMP *oldImp) {
 
 #pragma mark - 状态
 
-static IMP g_origViewDidLoad           = NULL;
-static IMP g_origViewWillAppear        = NULL;
-static IMP g_origViewDidLayoutSubviews = NULL;
-static IMP g_origWKInitWithFrame       = NULL;
-static IMP g_origWKInitWithCoder       = NULL;
+static IMP g_origViewDidLoad     = NULL;
+static IMP g_origViewWillAppear  = NULL;
+static IMP g_origWKInitWithFrame = NULL;
+static IMP g_origWKInitWithCoder = NULL;
 
 static NSUInteger g_appliedCount = 0;
+static NSUInteger g_retryCount   = 0;      /* 延后重试次数（全局上限） */
+static BOOL       g_inApply       = NO;    /* 重入保护 */
 
 /* 已经处理过的 VC，用 associated object 打标，避免重复设置 */
 static const void *kSAFMarkKey = &kSAFMarkKey;
+/* 延后重试次数的 per-VC 标记 */
+static const void *kSAFRetryKey = &kSAFRetryKey;
 
 #pragma mark - 核心：把 VC.view 收缩进安全区
 
-/* 拿到设备真实安全区。返回 NO 表示这台设备没有安全区（老机型），不要动。 */
+/* 设备是否真实存在安全区（刘海 / Home Indicator）。没有就绝不能动。 */
 static BOOL SAFDeviceHasSafeArea(UIViewController *vc) {
     UIWindow *win = vc.view.window;
     if (!win) {
-        /* view 还没上屏：退回到 keyWindow，safeAreaInsets 反映的是屏幕安全区 */
+        /* view 未上屏时退回 keyWindow —— 它的 safeAreaInsets 反映的是屏幕安全区 */
         for (UIWindow *w in [UIApplication sharedApplication].windows) {
             if (w.isKeyWindow) { win = w; break; }
         }
@@ -134,8 +162,25 @@ static BOOL SAFDeviceHasSafeArea(UIViewController *vc) {
 /* 真正执行收缩；已处理过则跳过 */
 static void SAFDoApply(id obj);
 
+static void SAFScheduleRetry(UIViewController *vc) {
+    if (g_retryCount >= 8) return;   /* 全局上限，别无限排程 */
+
+    NSNumber *n = objc_getAssociatedObject(vc, kSAFRetryKey);
+    if (n && n.integerValue >= 4) return;   /* per-VC 上限 */
+
+    g_retryCount++;
+    objc_setAssociatedObject(vc, kSAFRetryKey, @(n ? n.integerValue + 1 : 1),
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (objc_getAssociatedObject(vc, kSAFMarkKey) != nil) return;
+        SAFApplyToViewController(vc);
+    });
+}
+
 static void SAFApplyToViewController(id obj) {
     if (![obj isKindOfClass:[UIViewController class]]) return;
+    if (g_inApply) return;                 /* 重入保护 */
     UIViewController *vc = (UIViewController *)obj;
 
     NSString *mode = SAFConfigValue(@"SAF_MODE", @"auto");
@@ -152,18 +197,21 @@ static void SAFApplyToViewController(id obj) {
     /* 已处理过 */
     if (objc_getAssociatedObject(vc, kSAFMarkKey) != nil) return;
 
+    /* ★ 绝不主动触发 view 加载 —— isViewLoaded 只读，不会 loadView */
+    if (!vc.isViewLoaded) {
+        SAFScheduleRetry(vc);
+        return;
+    }
+
+    /* ★ 必须在 view 已经上屏时才动手：此时 UIKit 才真的知道安全区，
+       且改 edgesForExtendedLayout 不会和正在进行的布局打架 */
+    if (!vc.view.window) {
+        SAFScheduleRetry(vc);
+        return;
+    }
+
     if ([mode isEqualToString:@"auto"]) {
-        if (!SAFDeviceHasSafeArea(vc)) {
-            /* view 尚未上屏时 window 为 nil —— 下一轮 runloop 再试一次 */
-            if (!vc.view.window) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    if (objc_getAssociatedObject(vc, kSAFMarkKey) == nil) {
-                        SAFApplyToViewController(vc);
-                    }
-                });
-            }
-            return;
-        }
+        if (!SAFDeviceHasSafeArea(vc)) return;   /* 无刘海设备一律不动 */
     }
 
     NSString *navPolicy = SAFConfigValue(@"SAF_NAV", @"auto");
@@ -177,7 +225,7 @@ static void SAFApplyToViewController(id obj) {
 
 static void SAFDoApply(id obj) {
     UIViewController *vc = (UIViewController *)obj;
-    if (!vc.view) return;
+    if (!vc.isViewLoaded || !vc.view) return;
 
     UIRectEdge edges = vc.edgesForExtendedLayout;
     if (edges == UIRectEdgeNone) return;   /* 已经是收缩状态 */
@@ -188,7 +236,11 @@ static void SAFDoApply(id obj) {
     UIRectEdge stripped = edges & ~(UIRectEdgeTop | UIRectEdgeBottom);
     if (stripped == edges) return;
 
-    vc.edgesForExtendedLayout = stripped;
+    g_inApply = YES;
+
+    /* ★★★ 标记必须打在 setter 之前 ★★★
+       setter 内部会触发 setNeedsLayout，可能同步重入 layout 回调；
+       若标记还没设，重入时会再次进入这里 → 无限递归 → 崩溃。 */
     objc_setAssociatedObject(vc, kSAFMarkKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     g_appliedCount++;
 
@@ -199,26 +251,33 @@ static void SAFDoApply(id obj) {
            ins.top, ins.bottom,
            (unsigned long)g_appliedCount);
 
-    /* 立刻重排一次，让顶/底栏马上落位 */
+    vc.edgesForExtendedLayout = stripped;
+
+    /* ★ 只 setNeedsLayout，绝不 layoutIfNeeded ——
+       在 layout 回调里调 layoutIfNeeded 会造成无限递归。 */
     [vc.view setNeedsLayout];
-    [vc.view layoutIfNeeded];
+
+    g_inApply = NO;
 }
 
 #pragma mark - UIViewController hooks
 
+/* ★ 不再 hook viewDidLayoutSubviews —— layout pass 中改布局 = 无限递归 = 闪退 */
+
 static void SAF_hook_viewDidLoad(id self, SEL _cmd) {
     if (g_origViewDidLoad) ((void (*)(id, SEL))g_origViewDidLoad)(self, _cmd);
-    SAFApplyToViewController(self);
+    SAFProtected({
+        /* viewDidLoad 时 view 刚加载完但通常还没上屏 → 这里只排队，
+           等 viewWillAppear: / 下一轮 runloop 再真正动手 */
+        SAFApplyToViewController(self);
+    });
 }
 
-static void SAF_hook_viewWillAppear(id self, SEL _cmd, id animated) {
-    if (g_origViewWillAppear) ((void (*)(id, SEL, id))g_origViewWillAppear)(self, _cmd, animated);
-    SAFApplyToViewController(self);
-}
-
-static void SAF_hook_viewDidLayoutSubviews(id self, SEL _cmd) {
-    if (g_origViewDidLayoutSubviews) ((void (*)(id, SEL))g_origViewDidLayoutSubviews)(self, _cmd);
-    SAFApplyToViewController(self);
+static void SAF_hook_viewWillAppear(id self, SEL _cmd, BOOL animated) {
+    if (g_origViewWillAppear) ((void (*)(id, SEL, BOOL))g_origViewWillAppear)(self, _cmd, animated);
+    SAFProtected({
+        SAFApplyToViewController(self);
+    });
 }
 
 #pragma mark - WKWebView hooks（网页内容避开 Home Indicator）
@@ -254,7 +313,13 @@ static id SAF_hook_WKInitWithFrame(id self, SEL _cmd, CGRect frame) {
         ret = ((id (*)(id, SEL, CGRect))g_origWKInitWithFrame)(self, _cmd, frame);
     }
     Class wkClass = NSClassFromString(@"WKWebView");
-    if (wkClass && [ret isKindOfClass:wkClass]) SAFConfigureWebView(ret);
+    if (wkClass && [ret isKindOfClass:wkClass]) {
+        /* 延后一轮 runloop：不要在 WKWebView 初始化过程中动它的 scrollView */
+        id wv = ret;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            SAFProtected({ SAFConfigureWebView(wv); });
+        });
+    }
     return ret;
 }
 
@@ -264,7 +329,12 @@ static id SAF_hook_WKInitWithCoder(id self, SEL _cmd, NSCoder *coder) {
         ret = ((id (*)(id, SEL, NSCoder *))g_origWKInitWithCoder)(self, _cmd, coder);
     }
     Class wkClass = NSClassFromString(@"WKWebView");
-    if (wkClass && [ret isKindOfClass:wkClass]) SAFConfigureWebView(ret);
+    if (wkClass && [ret isKindOfClass:wkClass]) {
+        id wv = ret;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            SAFProtected({ SAFConfigureWebView(wv); });
+        });
+    }
     return ret;
 }
 
@@ -277,7 +347,6 @@ static void SafeAreaFixInit(void) {
     Class VC = [UIViewController class];
     if (SAFHook(VC, @selector(viewDidLoad), (IMP)SAF_hook_viewDidLoad, &g_origViewDidLoad)) installed++;
     if (SAFHook(VC, @selector(viewWillAppear:), (IMP)SAF_hook_viewWillAppear, &g_origViewWillAppear)) installed++;
-    if (SAFHook(VC, @selector(viewDidLayoutSubviews), (IMP)SAF_hook_viewDidLayoutSubviews, &g_origViewDidLayoutSubviews)) installed++;
 
     /* WKWebView 用 NSClassFromString 取，避免强制链接 WebKit.framework */
     Class WK = NSClassFromString(@"WKWebView");
@@ -286,6 +355,6 @@ static void SafeAreaFixInit(void) {
         if (SAFHook(WK, @selector(initWithCoder:), (IMP)SAF_hook_WKInitWithCoder, &g_origWKInitWithCoder)) installed++;
     }
 
-    SAFLog(@"✅ loading (%lu hooks installed) — 指尖浏览器安全区适配已启用",
+    SAFLog(@"✅ loading (%lu hooks installed) — 指尖浏览器安全区适配已启用 (v2 加固版)",
            (unsigned long)installed);
 }

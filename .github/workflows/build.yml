@@ -204,8 +204,7 @@ jobs:
 
           _expect = {
               'SAF_hook_viewDidLoad':           ('id', 'SEL'),
-              'SAF_hook_viewWillAppear':        ('id', 'SEL', 'id'),
-              'SAF_hook_viewDidLayoutSubviews': ('id', 'SEL'),
+              'SAF_hook_viewWillAppear':        ('id', 'SEL', 'BOOL'),
               'SAF_hook_WKInitWithFrame':       ('id', 'SEL', 'CGRect'),
               'SAF_hook_WKInitWithCoder':       ('id', 'SEL', 'NSCoder*'),
           }
@@ -219,14 +218,29 @@ jobs:
               _var, _params = _m.group(3), _m.group(2)
               _exp = {
                   'g_origViewDidLoad':           ('id', 'SEL'),
-                  'g_origViewWillAppear':        ('id', 'SEL', 'id'),
-                  'g_origViewDidLayoutSubviews': ('id', 'SEL'),
+                  'g_origViewWillAppear':        ('id', 'SEL', 'BOOL'),
                   'g_origWKInitWithFrame':       ('id', 'SEL', 'CGRect'),
                   'g_origWKInitWithCoder':       ('id', 'SEL', 'NSCoder*'),
               }[_var]
               assert _types(_params) == _exp, \
                   f'{_var} cast mismatch: {_types(_params)} != {_exp}'
           print('SafeAreaFix.m IMP prototype consistency check passed')
+
+          # v2 加固版的安全断言：这些是 v1 闪退的根因，不能回退
+          # 先剥掉注释，避免注释里提到这些名字造成误判
+          _code = _r.sub(r'/\*.*?\*/', '', f, flags=_r.S)
+          _code = _r.sub(r'//[^\n]*', '', _code)
+          assert 'layoutIfNeeded]' not in _code, \
+              'must not call layoutIfNeeded (infinite layout recursion -> crash)'
+          assert 'SAF_hook_viewDidLayoutSubviews' not in _code, \
+              'must not hook viewDidLayoutSubviews (layout pass mutation -> crash)'
+          assert 'g_origViewDidLayoutSubviews' not in _code, \
+              'must not hook viewDidLayoutSubviews (layout pass mutation -> crash)'
+          assert f.count('objc_setAssociatedObject(vc, kSAFMarkKey') == 1, \
+              'safe-area marker must be set exactly once (before the setter)'
+          assert 'isViewLoaded' in f, 'must guard view access with isViewLoaded'
+          assert 'SAFProtected' in f, 'hook bodies must be exception-guarded'
+          print('SafeAreaFix.m v2 hardening assertions passed')
           PY
 
       - name: Verify exported symbols
