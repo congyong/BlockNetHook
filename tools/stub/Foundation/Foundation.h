@@ -35,17 +35,18 @@ enum { UIDeviceOrientationUnknown = 0, UIDeviceOrientationPortrait = 1, UIDevice
 
 static inline CGRect CGRectMake(CGFloat x, CGFloat y, CGFloat w, CGFloat h){ CGRect r; r.origin.x=x;r.origin.y=y;r.size.width=w;r.size.height=h; return r; }
 static inline CGSize CGSizeMake(CGFloat w, CGFloat h){ CGSize s; s.width=w;s.height=h; return s; }
-static inline CGFloat CGRectGetMinX(CGRect r){ return r.origin.x; }
-static inline CGFloat CGRectGetMinY(CGRect r){ return r.origin.y; }
-static inline CGFloat CGRectGetMaxX(CGRect r){ return r.origin.x + r.size.width; }
-static inline CGFloat CGRectGetMaxY(CGRect r){ return r.origin.y + r.size.height; }
-static inline CGFloat CGRectGetWidth(CGRect r){ return r.size.width; }
-static inline CGFloat CGRectGetHeight(CGRect r){ return r.size.height; }
-static inline BOOL CGRectIsEmpty(CGRect r){ return r.size.width <= 0 || r.size.height <= 0; }
-static inline BOOL CGRectIntersectsRect(CGRect a, CGRect b){
-    return !(CGRectGetMaxX(a) <= CGRectGetMinX(b) || CGRectGetMaxX(b) <= CGRectGetMinX(a)
-          || CGRectGetMaxY(a) <= CGRectGetMinY(b) || CGRectGetMaxY(b) <= CGRectGetMinY(a));
-}
+/* ★ 必须是 extern 声明，不能写成 static inline ——
+   真实 SDK 里这些是 CoreGraphics 的导出符号，链接期需要 -framework CoreGraphics。
+   如果 stub 里定义成 inline，本地符号检查就看不到它们，
+   也就发现不了「忘记链接 CoreGraphics」这类错误（踩过的坑）。 */
+extern CGFloat CGRectGetMinX(CGRect r);
+extern CGFloat CGRectGetMinY(CGRect r);
+extern CGFloat CGRectGetMaxX(CGRect r);
+extern CGFloat CGRectGetMaxY(CGRect r);
+extern CGFloat CGRectGetWidth(CGRect r);
+extern CGFloat CGRectGetHeight(CGRect r);
+extern BOOL CGRectIsEmpty(CGRect r);
+extern BOOL CGRectIntersectsRect(CGRect a, CGRect b);
 static inline CGRect CGRectZeroMake(void){ return CGRectMake(0,0,0,0); }
 
 @class NSString, NSArray, NSMutableString, NSNumber, NSValue, NSDictionary, NSError, NSLocale;
