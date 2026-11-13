@@ -162,6 +162,9 @@ static BOOL SAFDeviceHasSafeArea(UIViewController *vc) {
 /* 真正执行收缩；已处理过则跳过 */
 static void SAFDoApply(id obj);
 
+/* WKWebView hook 的延迟补装（定义在文件后段） */
+static void SAFEnsureWebViewHook(void);
+
 static void SAFScheduleRetry(UIViewController *vc) {
     if (g_retryCount >= 8) return;   /* 全局上限，别无限排程 */
 
@@ -182,6 +185,9 @@ static void SAFApplyToViewController(id obj) {
     if (![obj isKindOfClass:[UIViewController class]]) return;
     if (g_inApply) return;                 /* 重入保护 */
     UIViewController *vc = (UIViewController *)obj;
+
+    /* 每次 VC 出现都补装 WKWebView hook（WebKit 可能晚于构造函数加载） */
+    SAFEnsureWebViewHook();
 
     NSString *mode = SAFConfigValue(@"SAF_MODE", @"auto");
     if ([mode isEqualToString:@"off"]) return;
@@ -283,6 +289,23 @@ static void SAF_hook_viewWillAppear(id self, SEL _cmd, BOOL animated) {
 #pragma mark - WKWebView hooks（网页内容避开 Home Indicator）
 /* 不链接 WebKit.framework：用 objc_msgSend 动态调用 */
 
+/* ★ v2 修正：WKWebView 类是「App 首次创建 WKWebView 时」才被 dyld 加载的。
+   如果 dylib 构造函数跑得比那更早，NSClassFromString 返回 nil，
+   init hook 就永远装不上（表现为网页内容不避让 Home Indicator）。
+   所以在每次 VC 出现时补装一次。 */
+static BOOL g_webViewHooked = NO;
+
+static void SAFEnsureWebViewHook(void) {
+    if (g_webViewHooked) return;
+    Class WK = NSClassFromString(@"WKWebView");
+    if (!WK) return;   /* WebKit 还没加载，下次再试 */
+    g_webViewHooked = YES;
+    NSUInteger n = 0;
+    if (SAFHook(WK, @selector(initWithFrame:), (IMP)SAF_hook_WKInitWithFrame, &g_origWKInitWithFrame)) n++;
+    if (SAFHook(WK, @selector(initWithCoder:), (IMP)SAF_hook_WKInitWithCoder, &g_origWKInitWithCoder)) n++;
+    SAFLog(@"ℹ️ WKWebView hooks 已补装 (%lu)", (unsigned long)n);
+}
+
 static void SAFConfigureWebView(id webView) {
     if (!webView) return;
     NSString *flag = SAFConfigValue(@"SAF_WEBVIEW", @"1");
@@ -348,12 +371,10 @@ static void SafeAreaFixInit(void) {
     if (SAFHook(VC, @selector(viewDidLoad), (IMP)SAF_hook_viewDidLoad, &g_origViewDidLoad)) installed++;
     if (SAFHook(VC, @selector(viewWillAppear:), (IMP)SAF_hook_viewWillAppear, &g_origViewWillAppear)) installed++;
 
-    /* WKWebView 用 NSClassFromString 取，避免强制链接 WebKit.framework */
-    Class WK = NSClassFromString(@"WKWebView");
-    if (WK) {
-        if (SAFHook(WK, @selector(initWithFrame:), (IMP)SAF_hook_WKInitWithFrame, &g_origWKInitWithFrame)) installed++;
-        if (SAFHook(WK, @selector(initWithCoder:), (IMP)SAF_hook_WKInitWithCoder, &g_origWKInitWithCoder)) installed++;
-    }
+    /* WKWebView 用 NSClassFromString 取，避免强制链接 WebKit.framework。
+       这里先试一次；若 WebKit 还没被 dyld 加载，SAFEnsureWebViewHook
+       会在后续每次 VC 出现时补装。 */
+    SAFEnsureWebViewHook();
 
     SAFLog(@"✅ loading (%lu hooks installed) — 指尖浏览器安全区适配已启用 (v2 加固版)",
            (unsigned long)installed);
