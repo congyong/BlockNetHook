@@ -36,7 +36,7 @@ jobs:
           set +e
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           clang -fsyntax-only -isysroot "$SDK" -fobjc-arc -framework Foundation \
-            -DBNP_USE_FISHHOOK=1 BlockNetPlus.m SafeAreaFix.m fishhook.c \
+            -DBNP_USE_FISHHOOK=1 BlockNetPlus.m SafeAreaFix.m SafeAreaDiag.m fishhook.c \
             > /tmp/syntax.log 2>&1
           rc=$?
           {
@@ -58,7 +58,7 @@ jobs:
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           rc=0
           : > /tmp/link.log
-          for spec in "BlockNetPlus.m fishhook.c" "SafeAreaFix.m"; do
+          for spec in "BlockNetPlus.m fishhook.c" "SafeAreaFix.m" "SafeAreaDiag.m"; do
             echo "=== linking: $spec ===" >> /tmp/link.log
             clang -dynamiclib $spec -isysroot "$SDK" -fobjc-arc -framework Foundation \
               -framework UIKit -DBNP_USE_FISHHOOK=1 -arch arm64 -miphoneos-version-min=13.0 \

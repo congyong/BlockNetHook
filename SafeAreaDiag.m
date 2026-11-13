@@ -37,6 +37,7 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <dispatch/dispatch.h>
 
 #pragma mark - 输出
 
@@ -131,12 +132,12 @@ static void DumpViewTree(UIView *v, NSInteger depth, UIWindow *win, NSMutableArr
 
     if (interesting) {
         NSString *pad = [@"" stringByPaddingToLength:depth * 2 withString:@" " startingAtIndex:0];
-        BOOL auto = v.translatesAutoresizingMaskIntoConstraints;
+        BOOL autoTF = v.translatesAutoresizingMaskIntoConstraints;
         DOut(@"%@V %@ frame=(%.0f,%.0f,%.0f,%.0f) safe=(%.0f,%.0f,%.0f,%.0f) hidden=%d alpha=%.2f autoTF=%d %@",
              pad, cn, f.origin.x, f.origin.y, f.size.width, f.size.height,
              win ? win.safeAreaInsets.top : 0, win ? win.safeAreaInsets.left : 0,
              win ? win.safeAreaInsets.bottom : 0, win ? win.safeAreaInsets.right : 0,
-             v.hidden, v.alpha, auto, flags.length ? [@"⚠️ " stringByAppendingString:flags] : @"");
+             v.hidden, v.alpha, autoTF, flags.length ? [@"⚠️ " stringByAppendingString:flags] : @"");
         if (flags.length) {
             [overlapList addObject:[NSString stringWithFormat:@"%@%@ frame=(%.0f,%.0f,%.0f,%.0f) %@",
                 [@"" stringByPaddingToLength:depth * 2 withString:@" " startingAtIndex:0],
@@ -175,9 +176,9 @@ static void TakeSnapshot(const char *tag) {
         g_buf = [NSMutableString string];
 
         UIScreen *scr = [UIScreen mainScreen];
-        DOut(@"screen=%.0fx%.0f scale=%.1f orientation=%ld",
+        DOut(@"screen=%.0fx%.0f scale=%.1f deviceOrientation=%ld",
              scr.bounds.size.width, scr.bounds.size.height, scr.scale,
-             (long)[scr valueForKey:@"orientation"]);
+             (long)[UIDevice currentDevice].orientation);
 
         NSArray *wins = [UIApplication sharedApplication].windows;
         DOut(@"windows=%lu", (unsigned long)wins.count);
