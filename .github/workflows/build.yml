@@ -1,9 +1,9 @@
-name: Build BlockNet dylib
+name: Build BlockNetPlus dylib
 
 on:
   push:
-    branches:
-      - main
+    # blocknetplus: 本插件在 congyong/BlockNetHook 上的独立分支，不覆盖原项目 main
+    branches: [main, blocknetplus]
   workflow_dispatch:
 
 permissions:
@@ -14,79 +14,436 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      - name: CheckoutB
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # ── 生成版本号 ──────────────────────────────────────────────────────────
-      - name: Generate Version
-        id: version
+      - name: Generate version
         run: |
           VERSION=v$(date +"%Y.%m.%d.%H%M%S")
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "Generated version: $VERSION"
 
-      # ── 下载 fishhook（Facebook，用于 C 函数 hook，同时作为编译依赖）──────
-      - name: Download fishhook
+      - name: Download fishhook (Facebook)
         run: |
           curl -fsSL -o fishhook.c https://raw.githubusercontent.com/facebook/fishhook/main/fishhook.c
           curl -fsSL -o fishhook.h https://raw.githubusercontent.com/facebook/fishhook/main/fishhook.h
 
-      # ── 编译 arm64 + arm64e fat dylib ─────────────────────────────────────
-      - name: Build dylib
+      # ── 语法检查 ──────────────────────────────────────────────────────────
+      # 失败时把 clang 的 error: 行用 ::error:: 注解抛出，GitHub run 页面的
+      # Annotations 区域就能直接看到，不用去翻完整日志（logs API 需要 token）。
+      - name: Syntax check
         run: |
+          set +e
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          clang -fsyntax-only -isysroot "$SDK" -fobjc-arc -framework Foundation \
+            -DBNP_USE_FISHHOOK=1 BlockNetPlus.m SafeAreaFix.m SafeAreaDiag.m fishhook.c \
+            > /tmp/syntax.log 2>&1
+          rc=$?
+          {
+            echo "### Syntax check (rc=$rc)"
+            echo '```'
+            cat /tmp/syntax.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          { grep -E "error:" /tmp/syntax.log || true; } | head -40 | while IFS= read -r l; do
+            echo "::error::$l"
+          done
+          exit $rc
 
-          # arm64
-          clang -dynamiclib \
-            BlockNet.m fishhook.c \
-            -isysroot "$SDK" \
-            -arch arm64 \
-            -miphoneos-version-min=13.0 \
-            -framework Foundation \
-            -fobjc-arc \
-            -Wno-unused-function \
-            -o BlockNet_arm64.dylib
+      # ── 链接检查（逐个 dylib）────────────────────────────────────────────
+      # 定位到底是哪个 dylib 链接失败；顺带把完整链接日志写进 job summary。
+      - name: Link check each dylib separately
+        run: |
+          set +e
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          rc=0
+          : > /tmp/link.log
+          for spec in "BlockNetPlus.m fishhook.c" "SafeAreaFix.m" "SafeAreaDiag.m"; do
+            echo "=== linking: $spec ===" >> /tmp/link.log
+            clang -dynamiclib $spec -isysroot "$SDK" -fobjc-arc -framework Foundation \
+              -framework UIKit -framework CoreGraphics -DBNP_USE_FISHHOOK=1 \
+              -arch arm64 -miphoneos-version-min=13.0 \
+              -o /tmp/linktest.dylib >> /tmp/link.log 2>&1
+            if [ $? -ne 0 ]; then rc=1; fi
+          done
+          {
+            echo "### Link check (rc=$rc)"
+            echo '```'
+            cat /tmp/link.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          { grep -nE "error:|Undefined symbol|not found|duplicate symbol|ld: " /tmp/link.log || true; } | head -30 | while IFS= read -r l; do
+            echo "::error::$l"
+          done
+          { grep -A 10 "Undefined symbols" /tmp/link.log || true; } | head -16 | while IFS= read -r l; do
+            echo "::error::ctx: $l"
+          done
+          exit $rc
 
-          # arm64e（A12+ / iPhone XS 以上）
-          clang -dynamiclib \
-            BlockNet.m fishhook.c \
-            -isysroot "$SDK" \
-            -arch arm64e \
-            -miphoneos-version-min=13.0 \
-            -framework Foundation \
-            -fobjc-arc \
-            -Wno-unused-function \
-            -o BlockNet_arm64e.dylib
+      # ── 正式构建 ──────────────────────────────────────────────────────────
+      - name: Build arm64 + arm64e fat dylib
+        run: |
+          set +e
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          : > /tmp/build.log
+          trap '
+            { grep -nE "error:|Undefined symbol|not found|duplicate symbol|ld: " /tmp/build.log 2>/dev/null || true; } | head -30 | while IFS= read -r l; do echo "::error::$l"; done
+            { grep -A 10 "Undefined symbols" /tmp/build.log 2>/dev/null || true; } | head -16 | while IFS= read -r l; do echo "::error::ctx: $l"; done
+            { tail -60 /tmp/build.log 2>/dev/null || true; } | while IFS= read -r l; do echo "::error::log: $l"; done
+          ' ERR
+          WARN=(
+            -Wall
+            -Wno-unknown-warning-option
+            -Wno-unused-function
+            -Wno-deprecated-declarations
+            -Wno-cast-function-type-strict
+            -Wno-cast-function-type
+          )
 
-          # 合并成 fat binary
-          lipo -create BlockNet_arm64.dylib BlockNet_arm64e.dylib \
-               -output BlockNet.dylib
+          # ── 一体版：广告拦截 + 安全区适配 ────────────────────────────────
+          COMMON=(
+            BlockNetPlus.m SafeAreaFix.m fishhook.c
+            -isysroot "$SDK"
+            -fobjc-arc
+            -framework Foundation
+            -framework UIKit
+            -DBNP_USE_FISHHOOK=1
+            "${WARN[@]}"
+          )
 
-          # 验证
+          clang -dynamiclib "${COMMON[@]}" -arch arm64 \
+            -miphoneos-version-min=13.0 -o BlockNetPlus_arm64.dylib >> /tmp/build.log 2>&1
+          if [ $? -ne 0 ]; then cat /tmp/build.log; exit 1; fi
+
+          clang -dynamiclib "${COMMON[@]}" -arch arm64e \
+            -miphoneos-version-min=13.0 -o BlockNetPlus_arm64e.dylib >> /tmp/build.log 2>&1
+          if [ $? -ne 0 ]; then cat /tmp/build.log; exit 1; fi
+
+          lipo -create BlockNetPlus_arm64.dylib BlockNetPlus_arm64e.dylib \
+            -output BlockNetPlus.dylib
+
+          # ── 独立版：仅安全区适配（最小侵入，不碰网络层）─────────────────
+          SAFONLY=(
+            SafeAreaFix.m
+            -isysroot "$SDK"
+            -fobjc-arc
+            -framework Foundation
+            -framework UIKit
+            "${WARN[@]}"
+          )
+
+          clang -dynamiclib "${SAFONLY[@]}" -arch arm64 \
+            -miphoneos-version-min=13.0 -o SafeAreaFix_arm64.dylib >> /tmp/build.log 2>&1
+          if [ $? -ne 0 ]; then cat /tmp/build.log; exit 1; fi
+
+          clang -dynamiclib "${SAFONLY[@]}" -arch arm64e \
+            -miphoneos-version-min=13.0 -o SafeAreaFix_arm64e.dylib >> /tmp/build.log 2>&1
+          if [ $? -ne 0 ]; then cat /tmp/build.log; exit 1; fi
+
+          lipo -create SafeAreaFix_arm64.dylib SafeAreaFix_arm64e.dylib \
+            -output SafeAreaFix.dylib
+
+          # ── 诊断版（只读，零副作用）───────────────────────────────────
+          # ★ 必须 -framework CoreGraphics：SafeAreaDiag 用了 CGRectGetMaxX /
+          #   CGRectGetHeight 等 CoreGraphics 函数，缺了会报
+          #   "Undefined symbols for architecture arm64: _CGRectGetMaxX"
+          DIAGFLAGS=(
+            SafeAreaDiag.m
+            -isysroot "$SDK"
+            -fobjc-arc
+            -framework Foundation
+            -framework UIKit
+            -framework CoreGraphics
+            "${WARN[@]}"
+          )
+
+          clang -dynamiclib "${DIAGFLAGS[@]}" -arch arm64 \
+            -miphoneos-version-min=13.0 -o SafeAreaDiag_arm64.dylib >> /tmp/build.log 2>&1
+          if [ $? -ne 0 ]; then cat /tmp/build.log; exit 1; fi
+
+          clang -dynamiclib "${DIAGFLAGS[@]}" -arch arm64e \
+            -miphoneos-version-min=13.0 -o SafeAreaDiag_arm64e.dylib >> /tmp/build.log 2>&1
+          if [ $? -ne 0 ]; then cat /tmp/build.log; exit 1; fi
+
+          lipo -create SafeAreaDiag_arm64.dylib SafeAreaDiag_arm64e.dylib \
+            -output SafeAreaDiag.dylib
+
+          # ── 单架构 arm64 版 ──────────────────────────────────────────────
+          # LiveContainer 官方 README: "arm64e executable is untested.
+          # It is recommended to use arm64 binary." —— 容器环境优先用单架构 arm64。
+          lipo SafeAreaFix.dylib -thin arm64 -output SafeAreaFix-arm64.dylib
+          lipo BlockNetPlus.dylib -thin arm64 -output BlockNetPlus-arm64.dylib
+          lipo SafeAreaDiag.dylib -thin arm64 -output SafeAreaDiag-arm64.dylib
+
+          {
+            echo "### Build log"
+            echo '```'
+            cat /tmp/build.log
+            echo '```'
+            echo "### lipo info"
+            echo '```'
+            lipo -info BlockNetPlus.dylib
+            lipo -info SafeAreaFix.dylib
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
           echo "=== lipo info ==="
-          lipo -info BlockNet.dylib
+          lipo -info BlockNetPlus.dylib
+          lipo -info SafeAreaFix.dylib
           echo "=== file ==="
-          file BlockNet.dylib
+          file BlockNetPlus.dylib
+          file SafeAreaFix.dylib
 
-      # ── 创建 Release 并上传 ───────────────────────────────────────────────
+      # ── ad-hoc 签名 ────────────────────────────────────────────────────────
+      # 未签名的 dylib 在 iOS 15+/arm64e 上会被内核拒绝加载（AMFI：
+      # "code signature invalid" / 进程被 killed:9），LiveContainer 的
+      # Import Tweak 和 TrollStore 都只会静默失败，不报原因。
+      # 必须在 lipo 之后签名：签名覆盖整份 Mach-O（每个切片的 CodeDirectory
+      # 各自独立），先签再 lipo 会让 create 出来的 fat 文件签名失效。
+      - name: Ad-hoc sign dylibs
+        run: |
+          set -euo pipefail
+          LIBS=(
+            BlockNetPlus.dylib        BlockNetPlus-arm64.dylib
+            SafeAreaFix.dylib         SafeAreaFix-arm64.dylib
+            SafeAreaDiag.dylib        SafeAreaDiag-arm64.dylib
+          )
+          : > /tmp/sign.log
+          rc=0
+          for f in "${LIBS[@]}"; do
+            echo "=== $f ===" >> /tmp/sign.log
+            # --force：ld 可能已写入 ad-hoc 签名（arm64e 强制要求），要整份重签
+            # 才能保证 sig 与 lipo 后的页哈希一致
+            if ! codesign --force --sign - --timestamp=none "$f" >> /tmp/sign.log 2>&1; then
+              echo "::error::codesign failed: $f"; rc=1; continue
+            fi
+            codesign -dv --verbose=4 "$f" >> /tmp/sign.log 2>&1 || true
+            # 校验：整份 + 逐切片，arm64e 切片缺签名同样加载失败
+            for arch in $(lipo -archs "$f"); do
+              if ! codesign --verify --verbose=2 --arch "$arch" "$f" >> /tmp/sign.log 2>&1; then
+                echo "::error::codesign verify failed: $f ($arch)"; rc=1
+              fi
+            done
+            # 必须是 adhoc（用开发者证书签的名在别人的设备上反而更糟）
+            if ! codesign -dv "$f" 2>&1 | grep -q "Signature=adhoc"; then
+              echo "::error::not adhoc-signed: $f"; rc=1
+            fi
+          done
+          {
+            echo "### Ad-hoc signing (rc=$rc)"
+            echo '```'
+            cat /tmp/sign.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+      - name: Static sanity check
+        run: |
+          python3 - <<'PY'
+          s = open('BlockNetPlus.m', encoding='utf-8').read()
+          assert s.count('{') == s.count('}'), 'unbalanced braces'
+          assert 'BlockNetPlusInit' in s, 'missing constructor'
+          assert 'getaddrinfo' in s, 'missing C-level hook'
+          assert 'GCDWebServer' in s, 'missing local-server hook'
+          print('BlockNetPlus.m sanity check passed')
+
+          f = open('SafeAreaFix.m', encoding='utf-8').read()
+          assert f.count('{') == f.count('}'), 'unbalanced braces (SafeAreaFix)'
+          assert 'SafeAreaFixInit' in f, 'missing constructor (SafeAreaFix)'
+          assert 'edgesForExtendedLayout' in f, 'missing safe-area fix (SafeAreaFix)'
+          assert 'setContentInsetAdjustmentBehavior' in f, 'missing WKWebView inset (SafeAreaFix)'
+          assert '#import <WebKit/WebKit.h>' not in f, 'must not import WebKit header'
+          yml = open('.github/workflows/build.yml', encoding='utf-8').read()
+          import re as _re
+          blocks = _re.findall(r'(?:COMMON|SAFONLY)=\(([^)]*)\)', yml)
+          assert blocks, 'cannot locate compile flag blocks'
+          for _b in blocks:
+              assert 'WebKit' not in _b, 'must not link WebKit framework'
+              assert 'UIKit' in _b, 'must link UIKit (ObjC class refs need it)'
+          print('SafeAreaFix.m sanity check passed')
+
+          # IMP 原型一致性：hook 函数签名必须与 orig 调用处的指针原型逐个对齐
+          # （踩过的坑：initWithCoder: 的原型漏了 '*' → interface type 'NSCoder'
+          #   cannot be passed by value）
+          import re as _r
+          def _types(sig):
+              out = []
+              for _p in sig.split(','):
+                  _toks = _p.strip().split()
+                  if _toks[0] in ('id', 'SEL', 'Class', 'IMP'):
+                      out.append(_toks[0])
+                  elif _toks[0].startswith('*') or (len(_toks) > 1 and _toks[1].startswith('*')):
+                      out.append(_toks[0] + '*')
+                  else:
+                      out.append(_toks[0])
+              return tuple(out)
+
+          _expect = {
+              'SAF_hook_viewDidLoad':           ('id', 'SEL'),
+              'SAF_hook_viewWillAppear':        ('id', 'SEL', 'BOOL'),
+              'SAF_hook_WKInitWithFrame':       ('id', 'SEL', 'CGRect'),
+              'SAF_hook_WKInitWithCoder':       ('id', 'SEL', 'NSCoder*'),
+          }
+          for _name, _exp in _expect.items():
+              _m = _r.search(r'static \w+ ' + _name + r'\(([^)]*)\)', f)
+              assert _m, 'cannot locate ' + _name
+              assert _types(_m.group(1)) == _exp, \
+                  f'{_name} signature mismatch: {_types(_m.group(1))} != {_exp}'
+
+          for _m in _r.finditer(r'\(\((\w+) \(\*\)\(([^)]*)\)\)(g_orig\w+)\)', f):
+              _var, _params = _m.group(3), _m.group(2)
+              _exp = {
+                  'g_origViewDidLoad':           ('id', 'SEL'),
+                  'g_origViewWillAppear':        ('id', 'SEL', 'BOOL'),
+                  'g_origWKInitWithFrame':       ('id', 'SEL', 'CGRect'),
+                  'g_origWKInitWithCoder':       ('id', 'SEL', 'NSCoder*'),
+              }[_var]
+              assert _types(_params) == _exp, \
+                  f'{_var} cast mismatch: {_types(_params)} != {_exp}'
+          print('SafeAreaFix.m IMP prototype consistency check passed')
+
+          # v2 加固版的安全断言：这些是 v1 闪退的根因，不能回退
+          # 先剥掉注释，避免注释里提到这些名字造成误判
+          _code = _r.sub(r'/\*.*?\*/', '', f, flags=_r.S)
+          _code = _r.sub(r'//[^\n]*', '', _code)
+          assert 'layoutIfNeeded]' not in _code, \
+              'must not call layoutIfNeeded (infinite layout recursion -> crash)'
+          assert 'SAF_hook_viewDidLayoutSubviews' not in _code, \
+              'must not hook viewDidLayoutSubviews (layout pass mutation -> crash)'
+          assert 'g_origViewDidLayoutSubviews' not in _code, \
+              'must not hook viewDidLayoutSubviews (layout pass mutation -> crash)'
+          assert f.count('objc_setAssociatedObject(vc, kSAFMarkKey') == 1, \
+              'safe-area marker must be set exactly once (before the setter)'
+          assert 'isViewLoaded' in f, 'must guard view access with isViewLoaded'
+          assert 'SAFProtected' in f, 'hook bodies must be exception-guarded'
+          print('SafeAreaFix.m v2 hardening assertions passed')
+
+          # 声明先于使用：C99 起隐式函数声明是编译错误
+          # （踩过的坑：SAFApplyToViewController / SAF_hook_WKInitWithFrame
+          #   先被调用后定义 → 'use of undeclared identifier'）
+          _lines = f.split('\n')
+          _names = set(_r.findall(r'^static\s+[\w\s\*]*?\b(\w+)\s*\(', f, _r.M))
+          for _n in sorted(_names):
+              for _i, _l in enumerate(_lines):
+                  if _r.search(r'\b' + _r.escape(_n) + r'\s*\(', _l):
+                      assert _l.strip().startswith('static'), \
+                          f'{_n} first used at line {_i+1} before its declaration: {_l.strip()[:80]}'
+                      break
+          print('SafeAreaFix.m declaration-before-use check passed')
+
+          d = open('SafeAreaDiag.m', encoding='utf-8').read()
+          assert d.count('{') == d.count('}'), 'unbalanced braces (SafeAreaDiag)'
+          assert 'SafeAreaDiagInit' in d, 'missing constructor (SafeAreaDiag)'
+          assert 'edgesForExtendedLayout =' not in d, \
+              'diagnostic build must not modify edgesForExtendedLayout (read-only!)'
+          _dcode = _r.sub(r'/\*.*?\*/', '', d, flags=_r.S)
+          _dcode = _r.sub(r'//[^\n]*', '', _dcode)
+          assert 'setFrame:' not in _dcode, 'diagnostic build must not set frames'
+          assert 'setEdgesForExtendedLayout' not in _dcode, \
+              'diagnostic build must not modify edges'
+          assert 'setNeedsLayout' not in _dcode, 'diagnostic build must not trigger layout'
+          print('SafeAreaDiag.m read-only assertions passed')
+          PY
+
+      - name: Verify exported symbols
+        run: |
+          echo "=== BlockNetPlus.dylib ==="
+          nm -m BlockNetPlus.dylib | grep -E 'BlockNetPlusInit|SafeAreaFixInit|hook_getaddrinfo' || true
+          echo "=== SafeAreaFix.dylib ==="
+          nm -m SafeAreaFix.dylib | grep -E 'SafeAreaFixInit' || true
+          echo "=== SafeAreaDiag.dylib ==="
+          nm -m SafeAreaDiag.dylib | grep -E 'SafeAreaDiagInit' || true
+          echo "=== architectures ==="
+          lipo -info BlockNetPlus.dylib
+          lipo -info SafeAreaFix.dylib
+          lipo -info SafeAreaFix-arm64.dylib
+          echo "=== code signature (expect Signature=adhoc) ==="
+          for f in BlockNetPlus.dylib BlockNetPlus-arm64.dylib \
+                   SafeAreaFix.dylib SafeAreaFix-arm64.dylib \
+                   SafeAreaDiag.dylib SafeAreaDiag-arm64.dylib; do
+            printf '%s: ' "$f"; codesign -dv "$f" 2>&1 | grep -E 'Signature=|Format=' | tr '\n' ' '; echo
+          done
+
+      # Release asset 的 glob 对中文文件名会退化成 default.md，先复制成 ASCII 名
+      - name: Normalize release asset names
+        run: cp 规则清单.md RULES.md
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.VERSION }}
-          name: ${{ env.VERSION }}
+          name: BlockNetPlus ${{ env.VERSION }}
           body: |
-            ## BlockNet ${{ env.VERSION }}
+            ## BlockNetPlus ${{ env.VERSION }}
 
-            屏蔽 `umeng.com` 和 `umengcloud.com` 的所有网络请求。
+            基于 [congyong/BlockNetHook](https://github.com/congyong/BlockNetHook) 扩展的
+            广告 / 追踪拦截 + 安全区适配 dylib。
 
-            ### 安装
-            1. 下载 `BlockNet.dylib`
-            2. 在 LiveContainer → **Tweaks** → `+` → **Import Tweak**
-            3. 选择子文件夹或放根目录（全局生效）
-            4. 在 App 设置中设置 **Tweak Folder**，启动即生效
+            ### 两个产物
 
-            ### 验证
-            在设备日志中搜索 `[BlockNet]`，看到 `✅ All hooks installed` 表示加载成功。
-          files: BlockNet.dylib
+            | 文件 | 内容 | 适用场景 |
+            |---|---|---|
+            | `BlockNetPlus.dylib` | 广告拦截 + 安全区适配 | 想两者都要 |
+            | `SafeAreaFix.dylib` | 仅安全区适配 | 只想修刘海屏布局，不碰网络层 |
+
+            **两个都是 fat dylib（arm64 + arm64e），可同时加载。**
+
+            ### 签名状态
+
+            所有产物已由 CI 用 `codesign --force --sign -` 完成 **ad-hoc 签名**
+            （每个切片单独校验）。iOS 15+/arm64e 上未签名的 dylib 会被 AMFI
+            直接拒绝加载，且 LiveContainer / TrollStore 不报原因，所以这一步是必须的。
+
+            下载后本机可自证：`codesign -dv BlockNetPlus.dylib` 应打印
+            `Signature=adhoc`；`codesign --verify --verbose=2 BlockNetPlus.dylib` 无输出即通过。
+            **改动 dylib（strip / 注入 / 修改数据）后必须重新签名**，否则签名失效。
+
+            ### 安全区适配做了什么
+
+            指尖浏览器Pro 1.9 建于 2018 年（iOS 11.1 SDK），主二进制实测：
+            `safeAreaInsets` / `safeAreaLayoutGuide` / `viewSafeAreaInsetsDidChange` /
+            `contentInsetAdjustmentBehavior` **全部 0 次引用**，布局一律按
+            `UIScreen.main.bounds` 硬算。iOS 13+ 把这类旧 App 铺满全屏后，
+            顶栏压进刘海/灵动岛、底栏压进 Home Indicator，按钮点不到。
+
+            修法（不改业务逻辑）：
+            - hook `UIViewController.viewDidLoad` / `viewWillAppear:` /
+              `viewDidLayoutSubviews`，在原实现后把 `edgesForExtendedLayout`
+              剥离 Top/Bottom 位 → UIKit 把 VC.view 收缩进安全区，
+              App 内部相对布局随之整体落位
+            - hook `WKWebView` 初始化，强制 `contentInsetAdjustmentBehavior = .always`
+              → 网页内容避开底部 Home Indicator（WebKit 的经典坑）
+            - 安全阀：仅在 `window.safeAreaInsets` 非零的设备上动作，
+              iPhone SE / 8 等无刘海机型完全不受影响
+
+            可调开关（App 内 NSUserDefaults）：
+            `SAF_LOG=0` 关日志 · `SAF_MODE=off` 关闭 · `SAF_NAV=bare|nav` 调整适用范围 ·
+            `SAF_WEBVIEW=0` 关闭 WKWebView inset 修正
+
+            ### 广告拦截部分
+
+            - 三档规则：loose / standard(默认) / strict
+            - ObjC 层：NSURLSession 12 个 task 工厂、NSURLConnection、NSData、WKWebView、NSURLProtocol
+            - 修复原项目盲点：注入 NSURLSessionConfiguration.protocolClasses
+            - C 层：fishhook rebind getaddrinfo
+            - 默认禁用 GCDWebServer 本机 HTTP 服务（WiFi 传文件）
+            - 硬编码白名单保护 IAP / 订阅 / 登录接口，不干预付费逻辑
+
+            ### 安装（LiveContainer 外置 dylib）
+
+            LiveContainer → Tweaks → `+` → Import Tweak → 选择 dylib →
+            在 App 设置中设置 Tweak Folder。设备日志搜索 `[BlockNet+]` / `[SafeAreaFix]`，
+            看到 `✅ N hooks installed` 即加载成功。
+
+            配置开关见仓库 `规则清单.md`。
+          files: |
+            BlockNetPlus.dylib
+            SafeAreaFix.dylib
+            BlockNetPlus-arm64.dylib
+            SafeAreaFix-arm64.dylib
+            SafeAreaDiag.dylib
+            SafeAreaDiag-arm64.dylib
+            README.md
+            RULES.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
