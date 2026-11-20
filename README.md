@@ -156,12 +156,31 @@ make clean      # 清理产物
 
 ## 注入与验证
 
-沿用原仓库的方式（LiveContainer，无需重签）：
+LiveContainer 的流程：
 
 1. LiveContainer → **Tweaks** → `+` → **Import Tweak** → 选 `BlockNetPlus.dylib`
-   （只想修安全区就选 `SafeAreaFix.dylib`）。
-2. 放到全局 Tweak 目录，或只放进鲨鱼浏览器的应用目录。
+   （只想修安全区就选 `SafeAreaFix.dylib`）。**必须走这个入口**。
+2. 放到全局 Tweak 目录，或只放进鲨鱼浏览器的应用目录（Tweaks → New Folder）。
 3. 在 App 设置里设置 **Tweak Folder**，重新启动生效。
+
+⚠️ **别用文件 App 直接往 `Documents/Tweaks/` 里拷文件。** 那样文件不会被登记，
+LiveContainer 启动前也就不会给它重签，`dlopen` 会报
+`code signature invalid ... (errno=1)`。已经拷进去了的话：Tweaks 标签页里长按该文件
+→ **Sign** 手动签一次（老版本是右上角签名按钮），再启动 App。
+
+### 为什么 ad-hoc 签名还不够
+
+本仓库的 CI 已经做了 ad-hoc 签名（`codesign --force --sign -`，每个切片都验过），
+那只满足"至少 ad-hoc"这一层。容器里的进程还要求被 `dlopen` 的镜像与主程序属于
+**同一签名身份**，ad-hoc 没有证书/team，所以内核照样以 `errno=1` 拒绝。
+LiveContainer 的做法就是启动前用自己的证书把 tweak 重签一遍（TweakInfo.plist 记账），
+这也是官方文档说 "Tweaks must be signed before they can be loaded" 的含义 ——
+这里说的签名是**它签**，不是作者签。判定设备上的文件有没有被重签：看日志里的
+`codeBlobOffset` / `codeBlobSize`，和 release 里原始文件一致就说明没重签。
+
+排错顺序：Sign 之后仍失败 → 看 LiveContainer 的签名证书/描述文件是否过期（免费证书 7 天），
+重新侧载后再试 → 确认目标 App 是 private（shared App 的 Tweak Folder 只读）
+→ 确认 TweakLoader 没在 App 设置里被禁用。
 
 若要注入到已砸壳的 IPA，需要在注入后自行完成重签名；本仓库不提供签名、侧载与分发流程。
 
