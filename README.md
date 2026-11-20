@@ -163,10 +163,12 @@ LiveContainer 的流程：
 2. 放到全局 Tweak 目录，或只放进鲨鱼浏览器的应用目录（Tweaks → New Folder）。
 3. 在 App 设置里设置 **Tweak Folder**，重新启动生效。
 
-⚠️ **别用文件 App 直接往 `Documents/Tweaks/` 里拷文件。** 那样文件不会被登记，
-LiveContainer 启动前也就不会给它重签，`dlopen` 会报
-`code signature invalid ... (errno=1)`。已经拷进去了的话：Tweaks 标签页里长按该文件
-→ **Sign** 手动签一次（老版本是右上角签名按钮），再启动 App。
+⚠️ **别用文件 App 直接往 `Documents/Tweaks/` 里拷文件。** 那样文件不会被登记
+（TweakInfo.plist 没有记录），LiveContainer 启动前也就不会给它重签，
+`dlopen` 会报 `code signature invalid ... (errno=1)`。
+
+已经拷进去了的话，**把文件移出 Tweaks 目录，再用 `+` → Import Tweak 重新导入**
+（实测：光点 Sign 不够，必须是走导入流程重新登记），然后重启 App。
 
 ### 为什么 ad-hoc 签名还不够
 
