@@ -165,6 +165,14 @@ make clean      # 清理产物
 
 若要注入到已砸壳的 IPA，需要在注入后自行完成重签名；本仓库不提供签名、侧载与分发流程。
 
+**签名**：Release 里的 dylib 已由 CI 做 ad-hoc 签名（`codesign --force --sign -`，
+每个切片都校验过）。iOS 15+ / arm64e 上未签名的 dylib 会被 AMFI 直接拒绝加载，
+而 LiveContainer / TrollStore 只会静默失败、不报原因——所以这一步不能省。
+本机自证：`codesign -dv BlockNetPlus.dylib` 打印 `Signature=adhoc`；
+`codesign --verify --verbose=2 BlockNetPlus.dylib` 无输出即通过。
+自己本地编译时 `make` 已含 `sign` 目标；**对产物做过 strip / 注入 / 改数据后必须重新签名**，
+否则页哈希失效，加载同样失败。
+
 **验证**：设备日志搜索 `[BlockNet+]`，应看到：
 
 ```

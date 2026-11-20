@@ -19,9 +19,10 @@ FLAGS := -dynamiclib -isysroot "$(SDK)" -fobjc-arc -framework Foundation \
 SAFFLAGS := -dynamiclib -isysroot "$(SDK)" -fobjc-arc -framework Foundation \
             -framework UIKit $(WARN)
 
-.PHONY: all deps arm64 arm64e fat saf safarm64 safarm64e safat safverify verify clean
+.PHONY: all deps arm64 arm64e fat saf safarm64 safarm64e safat safverify verify \
+        sign sigcheck clean
 
-all: fat safat verify safverify
+all: fat safat sign verify safverify sigcheck
 
 deps:
 	@test -f fishhook.c || curl -fsSL -o fishhook.c https://raw.githubusercontent.com/facebook/fishhook/main/fishhook.c
@@ -55,6 +56,23 @@ safverify: safat
 	@echo "=== lipo ==="; lipo -info $(SAF).dylib
 	@echo "=== file ==="; file $(SAF).dylib
 	@echo "=== exported constructor ==="; nm -m $(SAF).dylib | grep -E 'SafeAreaFixInit' || true
+
+# ── ad-hoc 签名（iOS 必需）───────────────────────────────────────────────
+# 未签名的 dylib 在 iOS 15+/arm64e 上被 AMFI 拒绝加载，且不会报错原因。
+# 必须在 lipo 之后签名；改动产物后（strip / inject / 改数据）要重新 make sign。
+sign: fat safat
+	codesign --force --sign - --timestamp=none $(NAME).dylib $(SAF).dylib
+	@echo "=== signatures ==="
+	@for f in $(NAME).dylib $(SAF).dylib; do \
+	  printf '%s: ' "$$f"; codesign -dv "$$f" 2>&1 | grep -E 'Signature=|Format=' | tr '\n' ' '; echo; \
+	done
+
+sigcheck:
+	@rc=0; for f in $(NAME).dylib $(SAF).dylib; do \
+	  for a in $$(lipo -archs "$$f"); do \
+	    codesign --verify --verbose=2 --arch "$$a" "$$f" || rc=1; \
+	  done; \
+	done; exit $$rc
 
 clean:
 	rm -f $(NAME)_arm64.dylib $(NAME)_arm64e.dylib $(NAME).dylib \

@@ -194,6 +194,49 @@ jobs:
           file BlockNetPlus.dylib
           file SafeAreaFix.dylib
 
+      # ── ad-hoc 签名 ────────────────────────────────────────────────────────
+      # 未签名的 dylib 在 iOS 15+/arm64e 上会被内核拒绝加载（AMFI：
+      # "code signature invalid" / 进程被 killed:9），LiveContainer 的
+      # Import Tweak 和 TrollStore 都只会静默失败，不报原因。
+      # 必须在 lipo 之后签名：签名覆盖整份 Mach-O（每个切片的 CodeDirectory
+      # 各自独立），先签再 lipo 会让 create 出来的 fat 文件签名失效。
+      - name: Ad-hoc sign dylibs
+        run: |
+          set -euo pipefail
+          LIBS=(
+            BlockNetPlus.dylib        BlockNetPlus-arm64.dylib
+            SafeAreaFix.dylib         SafeAreaFix-arm64.dylib
+            SafeAreaDiag.dylib        SafeAreaDiag-arm64.dylib
+          )
+          : > /tmp/sign.log
+          rc=0
+          for f in "${LIBS[@]}"; do
+            echo "=== $f ===" >> /tmp/sign.log
+            # --force：ld 可能已写入 ad-hoc 签名（arm64e 强制要求），要整份重签
+            # 才能保证 sig 与 lipo 后的页哈希一致
+            if ! codesign --force --sign - --timestamp=none "$f" >> /tmp/sign.log 2>&1; then
+              echo "::error::codesign failed: $f"; rc=1; continue
+            fi
+            codesign -dv --verbose=4 "$f" >> /tmp/sign.log 2>&1 || true
+            # 校验：整份 + 逐切片，arm64e 切片缺签名同样加载失败
+            for arch in $(lipo -archs "$f"); do
+              if ! codesign --verify --verbose=2 --arch "$arch" "$f" >> /tmp/sign.log 2>&1; then
+                echo "::error::codesign verify failed: $f ($arch)"; rc=1
+              fi
+            done
+            # 必须是 adhoc（用开发者证书签的名在别人的设备上反而更糟）
+            if ! codesign -dv "$f" 2>&1 | grep -q "Signature=adhoc"; then
+              echo "::error::not adhoc-signed: $f"; rc=1
+            fi
+          done
+          {
+            echo "### Ad-hoc signing (rc=$rc)"
+            echo '```'
+            cat /tmp/sign.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
       - name: Static sanity check
         run: |
           python3 - <<'PY'
@@ -314,6 +357,12 @@ jobs:
           lipo -info BlockNetPlus.dylib
           lipo -info SafeAreaFix.dylib
           lipo -info SafeAreaFix-arm64.dylib
+          echo "=== code signature (expect Signature=adhoc) ==="
+          for f in BlockNetPlus.dylib BlockNetPlus-arm64.dylib \
+                   SafeAreaFix.dylib SafeAreaFix-arm64.dylib \
+                   SafeAreaDiag.dylib SafeAreaDiag-arm64.dylib; do
+            printf '%s: ' "$f"; codesign -dv "$f" 2>&1 | grep -E 'Signature=|Format=' | tr '\n' ' '; echo
+          done
 
       # Release asset 的 glob 对中文文件名会退化成 default.md，先复制成 ASCII 名
       - name: Normalize release asset names
@@ -338,6 +387,16 @@ jobs:
             | `SafeAreaFix.dylib` | 仅安全区适配 | 只想修刘海屏布局，不碰网络层 |
 
             **两个都是 fat dylib（arm64 + arm64e），可同时加载。**
+
+            ### 签名状态
+
+            所有产物已由 CI 用 `codesign --force --sign -` 完成 **ad-hoc 签名**
+            （每个切片单独校验）。iOS 15+/arm64e 上未签名的 dylib 会被 AMFI
+            直接拒绝加载，且 LiveContainer / TrollStore 不报原因，所以这一步是必须的。
+
+            下载后本机可自证：`codesign -dv BlockNetPlus.dylib` 应打印
+            `Signature=adhoc`；`codesign --verify --verbose=2 BlockNetPlus.dylib` 无输出即通过。
+            **改动 dylib（strip / 注入 / 修改数据）后必须重新签名**，否则签名失效。
 
             ### 安全区适配做了什么
 
